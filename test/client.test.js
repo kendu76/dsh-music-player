@@ -3232,6 +3232,59 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricFixture = null }
   })
 
+  it('labels file-embedded lyrics source=embedded (data-src="embedded")', async () => {
+    // /lyric 返回 source:'embedded'（文件内嵌歌词，非同名 .lrc）时，播放条歌词来源
+    // 标记应为 embedded，与本地同名 .lrc（local）区分开。
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'embedded',
+      lrc: [{ t: 0, text: '内嵌第一句' }, { t: 5, text: '内嵌第二句' }],
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('内嵌第一句')
+      expect(lyric.getAttribute('data-src')).toBe('embedded')
+    } finally { lyricFixture = null }
+  })
+
+  it('merges local .lrc format-C translation into "原文 ／ 翻译" on the bar lyric', async () => {
+    // Host 从本地 .lrc 拆出的 trans（格式 C 翻译）会走与在线歌词相同的 mergeLyricTrans，
+    // 把紧跟原句的翻译并入同一行「原文 ／ 翻译」显示。
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'local',
+      lrc: [{ t: 0, text: '窗外的麻雀' }, { t: 5, text: '雨下整夜' }],
+      trans: [{ t: 0.5, text: 'Sparrows outside the window' }],
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      // 播放条只显示当前行：t=0 的第一句已合并成「原文 ／ 翻译」
+      expect(lyric.textContent).toContain('窗外的麻雀 ／ Sparrows outside the window')
+      // 仍是本地 .lrc 来源
+      expect(lyric.getAttribute('data-src')).toBe('local')
+    } finally { lyricFixture = null }
+  })
+
   it('clicking the bar lyric opens a full-lyric panel that highlights the current line', async () => {
     // 单击播放条歌词/字幕 → 打开歌词面板：显示完整歌词，当前行高亮并随播放推进
     // 更新；再单击可关闭。面板默认居中、独立于播放面板。

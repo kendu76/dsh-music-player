@@ -16,7 +16,7 @@ import * as QRC from '../lib/qrc.js'
 import {
   apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS,
   zipEntries, zipReadEntry, htmlToText, decodeEntities, readEpubBuffer, qqQualityLabel,
-  parseAudioMeta, audioQualityLabel,
+  parseAudioMeta, audioQualityLabel, extractEmbeddedLyric, splitTranslatedLyric,
 } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
@@ -1435,6 +1435,94 @@ describe('dsh-music-player parseLrc', () => {
   })
 })
 
+describe('dsh-music-player splitTranslatedLyric (本地歌词「格式 C」翻译拆分)', () => {
+  it('splits a latin translation line that closely follows its Chinese line (<0.6s)', () => {
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 1.5, text: 'Sparrows outside the window' },
+      { t: 5, text: '雨下整夜' },
+      { t: 5.4, text: 'Rain falls all night' },
+    ])
+    expect(lrc).toEqual([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 5, text: '雨下整夜' },
+    ])
+    expect(trans).toEqual([
+      { t: 1.5, text: 'Sparrows outside the window' },
+      { t: 5.4, text: 'Rain falls all night' },
+    ])
+  })
+  it('splits a Chinese translation following its English line (外文歌 → 中文翻译，主流方向)', () => {
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 1, text: 'Sparrows outside the window' },
+      { t: 1.5, text: '窗外的麻雀' },
+      { t: 5, text: 'Rain falls all night' },
+      { t: 5.4, text: '雨下整夜' },
+    ])
+    expect(lrc).toEqual([
+      { t: 1, text: 'Sparrows outside the window' },
+      { t: 5, text: 'Rain falls all night' },
+    ])
+    expect(trans).toEqual([
+      { t: 1.5, text: '窗外的麻雀' },
+      { t: 5.4, text: '雨下整夜' },
+    ])
+  })
+  it('keeps pure-Chinese lyric lines as-is with no translation', () => {
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 5, text: '雨下整夜' },
+    ])
+    expect(lrc).toHaveLength(2)
+    expect(trans).toEqual([])
+  })
+  it('does NOT split latin watermark/song-title lines that have no nearby Chinese line', () => {
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 0, text: 'LeefenChen-月光游侠 QQ群:24275039' },
+      { t: 1, text: '窗外的麻雀' },
+    ])
+    expect(lrc).toHaveLength(2) // 水印行保留在主歌词（无对应中文原句）
+    expect(trans).toEqual([])
+  })
+  it('does NOT split a latin line too far from its Chinese line (>=0.6s)', () => {
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 5, text: 'Sparrows outside the window' },
+    ])
+    expect(lrc).toHaveLength(2)
+    expect(trans).toEqual([])
+  })
+  it('splits an English line followed closely by its Chinese line (外文在前 + 中文紧跟 → 中文是翻译)', () => {
+    // 双向判定下：1 英文 + 1 中文平局 → 首行(英文)为主语言 → 中文为翻译类，
+    // 紧跟(0.5s<0.6s)的中文被拆为翻译——覆盖「外文歌→中文翻译」的方向。
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 0.5, text: 'Sparrows outside' },
+      { t: 1, text: '窗外的麻雀' },
+    ])
+    expect(lrc).toEqual([{ t: 0.5, text: 'Sparrows outside' }])
+    expect(trans).toEqual([{ t: 1, text: '窗外的麻雀' }])
+  })
+  it('treats same-timestamp extra translation lines as translation too (does not pollute main lyric)', () => {
+    // 中文歌 + 英文翻译：主语言中文，紧跟原句的多个同时间戳英文行都归为翻译。
+    const { lrc, trans } = splitTranslatedLyric([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 2, text: '雨下整夜' },
+      { t: 2.5, text: 'Sparrows outside' },
+      { t: 2.5, text: 'Another translation' },
+    ])
+    expect(lrc).toEqual([
+      { t: 1, text: '窗外的麻雀' },
+      { t: 2, text: '雨下整夜' },
+    ])
+    expect(trans).toHaveLength(2)
+    expect(trans.map((t) => t.text)).toEqual(expect.arrayContaining(['Sparrows outside', 'Another translation']))
+  })
+  it('handles empty / non-array input gracefully', () => {
+    expect(splitTranslatedLyric([])).toEqual({ lrc: [], trans: [] })
+    expect(splitTranslatedLyric(null)).toEqual({ lrc: [], trans: [] })
+  })
+})
+
 describe('dsh-music-player /lyric route', () => {
   it('serves parsed LRC for a track with a sibling .lrc (case-insensitive fallback)', async () => {
     const { handler, musicDir, cleanup } = boot({
@@ -1473,6 +1561,73 @@ describe('dsh-music-player /lyric route', () => {
       const res2 = makeRes()
       await handler(makeReq({ url: '/dsh-music/lyric' }), res2)
       expect(res2.status).toBe(400)
+    } finally { cleanup() }
+  })
+  // 构造带 LYRICS 键的 FLAC（无同名 .lrc 时，/lyric 应回落到文件内嵌歌词）。
+  function flacWithEmbeddedLrc(lrcText) {
+    const streaminfo = Buffer.alloc(42)
+    streaminfo.write('fLaC', 0, 'ascii'); streaminfo[4] = 0x00
+    streaminfo.writeUIntBE(34, 5, 3)
+    streaminfo.writeUInt32BE(0, 18); streaminfo.writeUInt32BE(0, 22)
+    const vendor = Buffer.from('enc'); const parts = [Buffer.alloc(4), vendor, Buffer.alloc(4)]
+    parts[0].writeUInt32LE(vendor.length, 0); parts[2].writeUInt32LE(1, 0)
+    const key = Buffer.from('LYRICS=' + lrcText)
+    const len = Buffer.alloc(4); len.writeUInt32LE(key.length, 0)
+    parts.push(len, key)
+    const vbody = Buffer.concat(parts)
+    const vhdr = Buffer.alloc(4); vhdr[0] = 0x04 | 0x80; vhdr.writeUIntBE(vbody.length, 1, 3)
+    return Buffer.concat([streaminfo, vhdr, vbody])
+  }
+  it('serves embedded lyrics (file-internal LYRICS tag) when no sibling .lrc, marked source=embedded', async () => {
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: { 'song.flac': flacWithEmbeddedLrc('[00:01.00]内嵌第一句\n[00:05.00]内嵌第二句\n') },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent(join(musicDir, 'song.flac')) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.hasLrc).toBe(true)
+      expect(body.source).toBe('embedded')
+      expect(body.lrc).toEqual([
+        { t: 1, text: '内嵌第一句' },
+        { t: 5, text: '内嵌第二句' },
+      ])
+    } finally { cleanup() }
+  })
+  it('prefers a sibling .lrc over the file-embedded lyrics (source=local)', async () => {
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: {
+        'song.flac': flacWithEmbeddedLrc('[00:01.00]内嵌歌词\n'),
+        'song.lrc': '[00:01.00]同名歌词\n',
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent(join(musicDir, 'song.flac')) }), res)
+      const body = JSON.parse(res.body)
+      expect(body.source).toBe('local')
+      expect(body.lrc).toEqual([{ t: 1, text: '同名歌词' }])
+    } finally { cleanup() }
+  })
+  it('extracts format-C translation from a sibling .lrc into trans (原文 / 翻译 可合并)', async () => {
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: {
+        'song.mp3': 'M',
+        'song.lrc': '[00:01.00]窗外的麻雀\n[00:01.50]Sparrows outside the window\n[00:05.00]雨下整夜\n',
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) }), res)
+      const body = JSON.parse(res.body)
+      expect(body.source).toBe('local')
+      expect(body.lrc).toEqual([
+        { t: 1, text: '窗外的麻雀' },
+        { t: 5, text: '雨下整夜' },
+      ])
+      expect(body.trans).toEqual([{ t: 1.5, text: 'Sparrows outside the window' }])
     } finally { cleanup() }
   })
 })
@@ -2082,6 +2237,98 @@ describe('dsh-music-player local audio quality (parseAudioMeta)', () => {
       expect(byName['song.mp3']).toBe('MP3 · 标准')
       expect(byName['garbage.mp3']).toBe('')
     } finally { cleanup() }
+  })
+})
+
+describe('dsh-music-player 内嵌歌词提取 (extractEmbeddedLyric)', () => {
+  const syncsafe = (n) => Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f])
+  const plain32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b }
+
+  // 构造带 VORBIS_COMMENT 的 FLAC：STREAMINFO + VORBIS_COMMENT，可注入 LYRICS 键。
+  function flacWithComment(comments = []) {
+    const streaminfo = Buffer.alloc(42)
+    streaminfo.write('fLaC', 0, 'ascii'); streaminfo[4] = 0x00
+    streaminfo.writeUIntBE(34, 5, 3)
+    streaminfo.writeUInt32BE(0, 18); streaminfo.writeUInt32BE(0, 22)
+    // VORBIS_COMMENT 块（type 4）
+    const vendor = Buffer.from('test-encoder')
+    const parts = [Buffer.alloc(4), vendor, Buffer.alloc(4)]
+    parts[0].writeUInt32LE(vendor.length, 0)
+    parts[2].writeUInt32LE(comments.length, 0)
+    for (const c of comments) {
+      const cbuf = Buffer.from(c)
+      const len = Buffer.alloc(4); len.writeUInt32LE(cbuf.length, 0)
+      parts.push(len, cbuf)
+    }
+    const vbody = Buffer.concat(parts)
+    const vblockHdr = Buffer.alloc(4)
+    vblockHdr[0] = 0x04 | 0x80 // type 4 + last
+    vblockHdr.writeUIntBE(vbody.length, 1, 3)
+    return Buffer.concat([streaminfo, vblockHdr, vbody])
+  }
+
+  // 构造带 USLT 帧的 MP3（ID3v2.3 或 v2.4）。
+  function mp3WithUslt({ lyricText, enc = 3, descriptor = '', major = 4, lang = 'eng' } = {}) {
+    const bodyParts = [Buffer.from([enc]), Buffer.from(lang)]
+    if (enc === 1 || enc === 2) bodyParts.push(Buffer.from(descriptor, 'utf16le'), Buffer.from([0, 0]))
+    else bodyParts.push(Buffer.from(descriptor, 'utf8'), Buffer.from([0]))
+    if (enc === 1) bodyParts.push(Buffer.from(lyricText, 'utf16le'))
+    else bodyParts.push(Buffer.from(lyricText, 'utf8'))
+    const body = Buffer.concat(bodyParts)
+    const size = major >= 4 ? syncsafe(body.length) : plain32(body.length)
+    const frame = Buffer.concat([Buffer.from('USLT'), size, Buffer.from([0, 0]), body])
+    const tagSize = major >= 4 ? syncsafe(frame.length) : plain32(frame.length)
+    const tag = Buffer.concat([Buffer.from('ID3'), Buffer.from([major, 0]), Buffer.from([0x00]), tagSize, frame])
+    return Buffer.concat([tag, Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00])])
+  }
+
+  const LRC = '[00:01.00]窗外的麻雀\n[00:05.50]雨下整夜\n'
+
+  it('FLAC LYRICS 键（标准 LRC）直接提取', () => {
+    const buf = flacWithComment(['TITLE=七里香', 'LYRICS=' + LRC])
+    expect(extractEmbeddedLyric(buf)).toBe(LRC)
+  })
+  it('FLAC UNSYNCEDLYRICS 键同样识别', () => {
+    const buf = flacWithComment(['UNSYNCEDLYRICS=' + LRC])
+    expect(extractEmbeddedLyric(buf)).toBe(LRC)
+  })
+  it('FLAC 无 LYRICS 键 → null', () => {
+    expect(extractEmbeddedLyric(flacWithComment(['TITLE=x', 'ARTIST=y']))).toBeNull()
+    // LYRICS 存在但为空串 → 视为无词
+    expect(extractEmbeddedLyric(flacWithComment(['LYRICS=']))).toBeNull()
+  })
+  it('MP3 USLT 帧（UTF-8, ID3v2.4）提取', () => {
+    expect(extractEmbeddedLyric(mp3WithUslt({ lyricText: LRC, enc: 3, major: 4 }))).toBe(LRC)
+  })
+  it('MP3 USLT 帧（ID3v2.3 非 syncsafe 尺寸）提取', () => {
+    expect(extractEmbeddedLyric(mp3WithUslt({ lyricText: LRC, enc: 3, major: 3 }))).toBe(LRC)
+  })
+  it('MP3 USLT 帧（UTF-16, enc=1）提取', () => {
+    expect(extractEmbeddedLyric(mp3WithUslt({ lyricText: LRC, enc: 1, major: 4 }))).toBe(LRC)
+  })
+  it('MP3 USLT 带非空内容描述（descriptor）也能跳过取词', () => {
+    expect(extractEmbeddedLyric(mp3WithUslt({ lyricText: LRC, enc: 3, descriptor: 'lyrics', major: 4 }))).toBe(LRC)
+  })
+  it('MP3 无 USLT 帧 → null', () => {
+    // 只有 ID3 头 + MPEG 帧，无歌词帧
+    const id3 = Buffer.alloc(10); id3.write('ID3', 0, 'ascii'); id3[3] = 4; id3[4] = 0; id3[5] = 0
+    expect(extractEmbeddedLyric(Buffer.concat([id3, Buffer.from([0xff, 0xfb, 0x90, 0x00])]))).toBeNull()
+    // 纯 MPEG、无 ID3
+    expect(extractEmbeddedLyric(Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))).toBeNull()
+  })
+  it('「ID3 前缀 + FLAC」组合文件：先试 USLT（无），再跳标签按 FLAC 取词', () => {
+    const id3 = Buffer.alloc(10); id3.write('ID3', 0, 'ascii'); id3[3] = 4; id3[4] = 0; id3[5] = 0
+    const combo = Buffer.concat([id3, flacWithComment(['LYRICS=' + LRC])])
+    expect(extractEmbeddedLyric(combo)).toBe(LRC)
+  })
+  it('OGG 开头但无 \x01vorbis 注释头 → null（不误报）', () => {
+    const page = Buffer.alloc(60); page.write('OggS', 0, 'ascii')
+    expect(extractEmbeddedLyric(page)).toBeNull()
+  })
+  it('非法/过短输入 → null', () => {
+    expect(extractEmbeddedLyric(Buffer.alloc(4))).toBeNull()
+    expect(extractEmbeddedLyric('not a buffer')).toBeNull()
+    expect(extractEmbeddedLyric(null)).toBeNull()
   })
 })
 
