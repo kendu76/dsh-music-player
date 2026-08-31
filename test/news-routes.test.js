@@ -645,6 +645,46 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
     } finally { b.cleanup(); rmSync(home, { recursive: true, force: true }) }
   })
 
+  it('启动清理时注册表尚未就绪：等就绪后仍会归档会话（方案A 修复启动竞态）', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    const now = Date.now()
+    const file = join(home, '.dsh', 'music-player-news.json')
+    mkdirSync(join(home, '.dsh'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      editions: [
+        { id: 'stale', createdAt: now - 48 * 3600e3, chunks: ['x'], sessionId: 'news-exec-race' },
+      ],
+      schedulePrefs: {},
+      runState: null,
+      failures: [],
+    }), 'utf8')
+
+    // 模拟 DSH 并行挂载竞态：注册表构造完成但 init 未结束 → archiveSession 与
+    // archivedSessionIds 都抛「workspace registry is not started yet」，300ms 后才就绪。
+    const archived = []
+    let ready = false
+    const notStarted = () => { throw new Error('workspace registry is not started yet') }
+    const workspaceRegistry = {
+      get archivedSessionIds() { if (!ready) notStarted(); return [] },
+      archiveSession: async (sid) => { if (!ready) notStarted(); archived.push(sid) },
+    }
+    setTimeout(() => { ready = true }, 300)
+    const agents = makeAgents()
+    const b = boot({ agentsService: agents.service, workspaceRegistry, home })
+    try {
+      // 启动清理 fire-and-forget：等它等注册表就绪并完成归档
+      const deadline = Date.now() + 4000
+      while (Date.now() < deadline && archived.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(archived).toEqual(['news-exec-race'])
+      // 期次同样被删除
+      const data = JSON.parse(readFileSync(file, 'utf8'))
+      expect(data.editions.length).toBe(0)
+    } finally { b.cleanup(); rmSync(home, { recursive: true, force: true }) }
+  })
+
   it('run-now 未知班次返回 404，不创建执行会话', async () => {
     const agents = makeAgents()
     const { handler, cleanup } = boot({ agentsService: agents.service })
