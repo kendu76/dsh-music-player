@@ -1,6 +1,6 @@
 {
   "name": "dsh-music-player",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "DeepSeek Harness 音乐 + AI 讲书插件：Vibe coding人工作时的伴侣",
   "type": "module",
   "main": "lib/index.js",
