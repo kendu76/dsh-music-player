@@ -149,6 +149,7 @@ const newsScheduleDefault = {
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+let newsRunState = null // 收集运行态（null=空闲；非 null 时面板显示「收集中」并禁用 ▶）
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
@@ -157,7 +158,7 @@ async function fetchStub(url, opts) {
     return jsonRes({ ok: true, editions: newsEditionsFixture })
   }
   if (u === '/dsh-music/news/runstate') {
-    return jsonRes({ ok: true, run: null })
+    return jsonRes({ ok: true, run: newsRunState })
   }
   if (u === '/dsh-music/news/schedule') {
     if (o && o.method === 'POST') {
@@ -371,6 +372,7 @@ beforeEach(async () => {
   lyricOnlineFixture = null
   manifest = baseManifest()
   newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+  newsRunState = null
   await bootClient()
 })
 
@@ -8514,11 +8516,14 @@ describe('news pane（新闻播报页签）', () => {
       expect(container.textContent).toContain('早间新闻播报')
       expect(container.textContent).toContain('待播')
       expect(container.textContent).toContain('热点 2 · 国内 3 · AI 2')
-      // 已播的旧期次不显示待播徽标：整行文本不含「待播」（fixture 第二条 played=true）
-      const rows = [...container.querySelectorAll('.dsh-music-track')]
+      // 已播的旧期次不显示待播徽标：整卡文本不含「待播」（fixture 第二条 played=true）
+      const rows = [...container.querySelectorAll('.dsh-music-news-card')]
       const playedRow = rows.find((r) => r.textContent.includes('晚间新闻播报'))
       expect(playedRow).toBeTruthy()
       expect(playedRow.textContent.includes('待播')).toBe(false)
+      // 卡片两行布局：标题行 + 元信息行（时间 · 类别 chips）
+      expect(playedRow.querySelector('.dsh-music-news-card-title')).toBeTruthy()
+      expect(playedRow.querySelector('.dsh-music-news-card-meta').textContent).toContain('热点 4')
     } finally { }
   })
 
@@ -8535,8 +8540,8 @@ describe('news pane（新闻播报页签）', () => {
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       // 点期次标题进详情
-      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
-      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const row = [...container.querySelectorAll('.dsh-music-news-card')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       // 详情层结构：头部（返回/操作栏）固定，仅下方内容列表滚动
       const headEl = container.querySelector('.dsh-music-news-head')
@@ -8635,6 +8640,38 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
+  it('定时编辑器：收集进行中时 ▶ 置灰显示 ⟳、状态行提示收集中', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      // 模拟一次收集正在运行
+      newsRunState = { shiftId: 's1', sessionId: 'news-exec-demo', startedAt: Date.now(), scope: '热点/国内' }
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 列表页签状态行提示收集中：显示班次时刻而非内部随机 id
+      expect(container.textContent).toContain('08:00 班次 收集中')
+      expect(container.textContent).not.toContain('s1 收集中')
+      // 进入定时编辑器：▶ 全部置灰且显示 ⟳
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const runBtns = [...container.querySelectorAll('.dsh-music-news-shift-card button')].filter((b) => b.textContent === '⟳')
+      expect(runBtns.length).toBe(newsScheduleServer.shifts.length)
+      expect(runBtns.every((b) => b.disabled)).toBe(true)
+      expect(runBtns[0].title).toContain('收集进行中')
+      // 运行中不出现可点的 ▶（恢复路径 run=null → ▶ 可点由空闲态用例覆盖）
+      expect([...container.querySelectorAll('.dsh-music-news-shift-card button')].filter((b) => b.textContent === '▶').length).toBe(0)
+    } finally {
+      newsRunState = null
+    }
+  })
+
   it('添加班次：自定义主题输入即生效，无需回车（保存时自动收进 topics）', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -8680,6 +8717,205 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
+  it('新闻播完自动切回被打断的讲书（进度续播 + 字幕重载）', async () => {
+    bookTextFixture = '小说块字幕。'
+    manifest = {
+      ...baseManifest(),
+      ttsConfigured: true, ttsReason: '',
+      books: [{ id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }],
+    }
+    // 讲书进度：播到第 2 块（分键持久化，新闻播放不覆盖）
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({ '测试小说.txt': { from: 2, base: 30, pos: 0, total: 25, ts: 999999999 } }) }
+    const audios = []
+    class BAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const textFetches = []
+    let intent = null
+    let intentPoll = null
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/intent') return jsonRes(intent)
+      if (u.includes('/text?from=')) textFetches.push(u)
+      return baseFetch(url, opts)
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', BAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+
+    // (1) 讲书在播：b1 从第 2 块续播
+    intent = { action: 'play', id: 'b1', name: '测试小说' }
+    await act(async () => { await intentPoll() })
+    await tick(); await tick()
+    expect(audio.src).toContain('/dsh-music/book/b1')
+    expect(audio.src).toContain('from=2')
+    act(() => { audio.emit('play') })
+
+    // (2) 班次新闻自动播报打断讲书
+    intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+    await act(async () => { await intentPoll() })
+    await tick(); await tick()
+    expect(audio.src).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    act(() => { audio.emit('play') })
+
+    // (3) 新闻 4 块逐块 ended → 最后一块自然播完触发恢复
+    for (let i = 0; i < 4; i++) {
+      act(() => { audio.emit('ended') })
+      await tick(); await tick()
+    }
+
+    // (4) 断言：切回 b1 并回到第 2 块进度；该块字幕重新加载（fetch /text?from=2）
+    expect(audio.src).toContain('/dsh-music/book/b1')
+    expect(audio.src).toContain('from=2')
+    expect(audio.src).not.toContain('/dsh-music/news/')
+    expect(textFetches.some((u) => u.includes('/dsh-music/book/b1/text?from=2'))).toBe(true)
+    expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('测试小说')
+  })
+
+  it('新闻列表：点击整行任意位置都进详情；行内按钮不误触导航', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 点击行容器自身（不点内部文字）→ 进入详情
+      const row = container.querySelector('.dsh-music-news-body .dsh-music-news-card')
+      expect(row.querySelector('.dsh-music-news-card-title')).toBeTruthy()
+      expect(row.querySelector('.dsh-music-news-card-meta').textContent).toContain('热点')
+      expect(row).toBeTruthy()
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('文字版') // 详情页切换按钮
+      // 返回列表，点行内 🗑：仅弹删除确认，不进入详情（stopPropagation 生效）
+      const backBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '← 返回')
+      expect(backBtn).toBeTruthy()
+      act(() => { backBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const delBtn = [...container.querySelectorAll('.dsh-music-news-body .dsh-music-news-card button')].find((b) => b.title === '删除')
+      act(() => { delBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('确定删除这一期新闻简报吗')
+      expect(container.textContent).not.toContain('文字版')
+    } finally { }
+  })
+
+  it('新闻播完自动切回被打断的本地音乐（断点续播）', async () => {
+    // 场景：音乐播放中 → 班次新闻自动播报（intent）→ 新闻自然播完 → 音乐从断点恢复。
+    bookTextFixture = '新闻块字幕。'
+    manifest = {
+      ...baseManifest(),
+      ttsConfigured: true, ttsReason: '', books: [],
+      tracks: [
+        { id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' },
+        { id: '1', name: 'b.mp3', url: '/dsh-music/1', size: 20, ext: 'mp3', path: '/music/b.mp3' },
+      ],
+      count: 2,
+    }
+    // 音乐断点持久化：a.mp3 播到 42s（savePlayback 分键存储，新闻播放不覆盖它）
+    prefsServer = { 'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }) }
+    const audios = []
+    class RAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    // 提供真歌词：验证续播后歌词会重新加载（stop 清 lyricTrackId → 守卫失效重取）
+    lyricFixture = { ok: true, hasLrc: true, lrc: '[00:01.00]测试歌词第一行' }
+    const lyricFetches = []
+    let intent = null
+    let intentPoll = null
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/intent') return jsonRes(intent)
+      if (u.startsWith('/dsh-music/lyric?path=')) lyricFetches.push(u)
+      return baseFetch(url, opts)
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', RAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+
+    // (1) 音乐在播：a.mp3（推进到 42s）
+    intent = { action: 'play', id: '0', name: 'a.mp3' }
+    await act(async () => { await intentPoll() })
+    await tick()
+    expect(audio.src).toContain('/dsh-music/0')
+    act(() => { audio.emit('play') })
+    audio.currentTime = 42
+    audio.duration = 210
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('timeupdate') })
+
+    // (2) 班次新闻自动播报（intent）打断音乐 → 虚拟书管线接管
+    intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+    await act(async () => { await intentPoll() })
+    await tick(); await tick()
+    expect(audio.src).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    act(() => { audio.emit('play') })
+
+    // (3) 新闻共 4 块，逐块 ended：最后一块自然播完 → 触发恢复
+    for (let i = 0; i < 4; i++) {
+      act(() => { audio.emit('ended') })
+      await tick(); await tick()
+    }
+
+    // (4) 断言：切回 a.mp3 并 seek 到 42s 断点继续
+    expect(audio.src).toContain('/dsh-music/0')
+    expect(audio.src).not.toContain('/dsh-music/news/')
+    expect(audio.currentTime).toBe(42)
+    expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('a')
+    // 歌词重载：音乐起播 1 次 + 新闻播完续播再加载 1 次（stop 清 lyricTrackId 后守卫放行）
+    await tick()
+    expect(lyricFetches.length).toBeGreaterThanOrEqual(2)
+  })
+
   it('新闻期次播放时显示字幕（走 /dsh-music/news/<id>/text 而非 /dsh-music/book/）', async () => {
     // Regression：loadBookSubtitle 曾硬编码 /dsh-music/book/<id>/text；新闻期次是虚拟书
     // （url=/dsh-music/news/<id>），打到不存在的路由 → 无声幕。现改用 book.url 作基座。
@@ -8716,8 +8952,8 @@ describe('news pane（新闻播报页签）', () => {
       const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
-      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const row = [...container.querySelectorAll('.dsh-music-news-card')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const playBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '▶ 播放整期')
       act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })

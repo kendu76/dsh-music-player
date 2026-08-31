@@ -146,6 +146,121 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
+  it('班次触发的收集：期次标题由 Host 确定性命名为「M月D日 HH:MM 新闻播报」，覆盖 agent 起名', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true,
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const out = await broadcast(newsBroadcast, { ...NEWS_BODY, title: 'agent 即兴起的标题', shiftId: 's1' })
+      expect(out.ok).toBe(true)
+      expect(out.skipped).toBe(false)
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), res)
+      const editions = JSON.parse(res.body).editions
+      // 标题日期取期次 date 字段（NEWS_BODY.date = 2026-05-30），时刻取班次配置
+      // （列表按 createdAt 降序，用 id 定位本期次）
+      expect(editions.find((e) => e.id === out.editionId).title).toBe('5月30日 08:00 新闻播报')
+      // 口播开场不重复追加日期（标题已含「M月D日」）
+      const text = makeRes()
+      await handler(makeReq({ url: `/dsh-music/news/${out.editionId}/text?from=0` }), text)
+      expect(JSON.parse(text.body).text).toContain('您好，这里是5月30日 08:00 新闻播报。')
+      // 对照：对话直接播报（无 shiftId）保留 agent 命名
+      const out2 = await broadcast(newsBroadcast, { ...NEWS_BODY, title: '自定义标题' })
+      expect(out2.ok).toBe(true)
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), res2)
+      const editions2 = JSON.parse(res2.body).editions
+      expect(editions2.find((e) => e.id === out2.editionId).title).toBe('自定义标题')
+    } finally { cleanup() }
+  })
+
+  it('run-now 并发拦截：已有收集进行中时拒绝新触发（不新建执行会话）', async () => {
+    let createdCount = 0
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        createdCount += 1
+        return { agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) } }
+      },
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const { handler, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} } })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [
+          { id: 'sa', time: '08:00', autoplay: true, scope: null },
+          { id: 'sb', time: '09:00', autoplay: true, scope: null },
+        ] }),
+      }), makeRes())
+      const r1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sa' }) }), r1)
+      expect(JSON.parse(r1.body).ok).toBe(true)
+      // 运行态可见（面板 5s 轮询据此显示「收集中」）
+      const rs = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/runstate' }), rs)
+      expect(JSON.parse(rs.body).run).toBeTruthy()
+      // 同班次再触发 → busy 拒绝
+      const r2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sa' }) }), r2)
+      const d2 = JSON.parse(r2.body)
+      expect(d2.ok).toBe(false)
+      expect(d2.busy).toBe(true)
+      expect(d2.fallback).toBe(false) // busy 不回退「复制指令」
+      expect(d2.error).toContain('已有收集进行中（08:00 班次）')
+      // 跨班次同样拒绝
+      const r3 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sb' }) }), r3)
+      expect(JSON.parse(r3.body).busy).toBe(true)
+      // 全程只创建过一个执行会话
+      expect(createdCount).toBe(1)
+    } finally { cleanup() }
+  })
+
+  it('班次范围精确性：范围外类别被过滤并在通知中说明；含主题时主题类别放行', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: { categories: ['科技'], topics: [] } }] }),
+      }), makeRes())
+      const mk = () => ({
+        title: 'x', shiftId: 's1', date: '2026-05-30',
+        categories: [
+          { name: '科技', items: [{ title: 't1', summary: 's', source: 'a' }] },
+          { name: 'AI', items: [{ title: 't2', summary: 's', source: 'b' }, { title: 't3', summary: 's', source: 'c' }] },
+        ],
+      })
+      const out = await broadcast(newsBroadcast, mk())
+      expect(out.ok).toBe(true)
+      expect(out.items).toBe(1) // AI（2 条）被过滤
+      expect(out.notice).toContain('已按班次范围过滤范围外类别：AI（2 条）')
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), res)
+      const ed = JSON.parse(res.body).editions.find((e) => e.id === out.editionId)
+      expect(ed.categories.map((c) => c.name)).toEqual(['科技'])
+      // 全部类别都越界 → 拒绝生成并说明范围
+      const out2 = await broadcast(newsBroadcast, { ...mk(), categories: [{ name: 'AI', items: [{ title: 't', summary: 's', source: 'x' }] }] })
+      expect(out2.ok).toBe(false)
+      expect(out2.notice).toContain('均不在班次范围内')
+      expect(out2.notice).toContain('科技')
+      // 班次声明了自定义主题 AI → 主题同名类别放行
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: { categories: ['科技'], topics: ['AI'] } }] }),
+      }), makeRes())
+      const out3 = await broadcast(newsBroadcast, { ...mk(), force: true })
+      expect(out3.ok).toBe(true)
+      expect(out3.items).toBe(3)
+      expect(out3.notice).not.toContain('已按班次范围过滤')
+    } finally { cleanup() }
+  })
+
   it('不同班次互不影响冷却窗；手动组独立', async () => {
     const { newsBroadcast, cleanup } = boot()
     try {
@@ -265,7 +380,7 @@ describe('news 路由', () => {
       await handler(makeReq({ url: `/dsh-music/news/${id}/text?from=${firstItemChunk}` }), itemText)
       const it = JSON.parse(itemText.body)
       expect(it.ok).toBe(true)
-      expect(it.text).toMatch(/^第[一二三四五六七八九十]+条，政策发布会召开/)
+      expect(it.text).toMatch(/^第[一二三四五六七八九十]+条，国新办今早介绍相关政策要点/)
       expect(it.text).toContain('介绍相关政策要点')
       expect(it.text).not.toContain('以上消息来自')
     } finally { cleanup() }
@@ -380,7 +495,10 @@ describe('news 路由', () => {
       const s2 = editions.filter((e) => e.originShiftId === 's2')
       expect(s1.length).toBe(LIMITS.retentionPerShift)
       expect(s2.length).toBe(1)
-      expect(editions[editions.length - 1].title).toBe('别班次') // 时间倒序混合流
+      // 列表按 createdAt 降序（同毫秒提交按插入序稳定排，不断言具体位置）
+      const times = editions.map((e) => e.createdAt)
+      expect(times).toEqual([...times].sort((a, b) => b - a))
+      expect(editions.some((e) => e.title === '别班次')).toBe(true)
     } finally { cleanup() }
   })
 })
@@ -493,13 +611,17 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
   it('启动时自动清理非今天的新闻并归档会话（不等 03:00）', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
     const now = Date.now()
+    // 「fresh」期次必须落在今天 00:00 之后（启动清理按自然日分界删除旧期次）——
+    // 直接用 now-1h 会在午夜后 1 小时内跑测试时落入昨天，产生时间相关的偶发失败。
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0)
+    const freshAt = Math.max(startOfToday.getTime() + 1000, now - 3600e3)
     const file = join(home, '.dsh', 'music-player-news.json')
     mkdirSync(join(home, '.dsh'), { recursive: true })
     writeFileSync(file, JSON.stringify({
       version: 1,
       editions: [
         { id: 'stale', createdAt: now - 48 * 3600e3, chunks: ['x'], sessionId: 'news-exec-old' },
-        { id: 'fresh', createdAt: now - 3600e3, chunks: ['y'], sessionId: 'news-exec-fresh' },
+        { id: 'fresh', createdAt: freshAt, chunks: ['y'], sessionId: 'news-exec-fresh' },
       ],
       schedulePrefs: {},
       runState: null,

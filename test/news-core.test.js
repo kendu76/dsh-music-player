@@ -65,28 +65,19 @@ describe('sanitizeEditionInput', () => {
     expect(r.ok).toBe(true)
     expect(r.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
   })
-  it('病态超长 summary 才截断且保留省略号（正常长度内容不截断）', () => {
-    // 正常长度（< summaryChars，即 200~220 字内）不被截断——不出现省略号。
-    const normal = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(20) }] }], // 160 字
-    })
-    expect(normal.value.categories[0].items[0].summary.endsWith('…')).toBe(false)
-    // 超过安全上限（防御病态输入）才截断并带省略号。
+  it('summary 不截断：生成长度即最终长度（仅去首尾空白）', () => {
+    // 字数上限只是提示词建议：代码不做任何截断，超长/无句末标点的内容原样保留
+    //（超长条目由分块按句边界切成多块播报，内容不丢）。
+    const long = '长'.repeat(270)
+    const noPunct = '第一句讲要点，内容充实'.repeat(30)
     const r = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '长'.repeat(LIMITS.summaryChars + 50) }] }],
+      categories: [{ name: '热点', items: [
+        { title: 't', summary: long },
+        { title: 't2', summary: '  ' + noPunct + '  ' },
+      ] }],
     })
-    expect(r.value.categories[0].items[0].summary.length).toBe(LIMITS.summaryChars)
-    expect(r.value.categories[0].items[0].summary.endsWith('…')).toBe(true)
-  })
-  it('超长摘要兜底在句末标点处断句（播报不断在半截）', () => {
-    // 每句 12 字 ×30 = 360 字，超出 220：应在前 220 字内最后一个「。」处收句（12×18=216 字）
-    const r = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '第一句讲要点，内容充实。'.repeat(30) }] }],
-    })
-    const s = r.value.categories[0].items[0].summary
-    expect(s.length).toBe(216)
-    expect(s.endsWith('。')).toBe(true)
-    expect(s.endsWith('…')).toBe(false)
+    expect(r.value.categories[0].items[0].summary).toBe(long)
+    expect(r.value.categories[0].items[1].summary).toBe(noPunct)
   })
 })
 
@@ -108,11 +99,11 @@ describe('renderScript + splitScriptChunks', () => {
     // 只出现一次「2026年8月31日」（标题里的一次，开场不再追加）。
     expect(t2.match(/2026年8月31日/g).length).toBe(1)
   })
-  it('条目句含序数、标题、摘要；不含来源尾缀', () => {
-    expect(text).toContain('第一条，某重大政策发布。今早国新办举行发布会')
+  it('条目句含序数、摘要（标题不播报）；不含来源尾缀', () => {
+    expect(text).toContain('第一条，今早国新办举行发布会')
     expect(text).not.toContain('以上消息来自')
-    expect(text).toContain('首先来听热点。')
-    expect(text).toContain('接下来听AI。')
+    expect(text).toContain('首先，将为您播报热点方面的新闻。')
+    expect(text).toContain('接下来，将为您播报AI方面的新闻。')
   })
   it('摘要自带句号时不会出现重复句号', () => {
     // VALID_BODY 的 summary 不带句号；构造一个带句号的验证不出现「。。」
@@ -120,12 +111,12 @@ describe('renderScript + splitScriptChunks', () => {
       categories: [{ name: '热点', items: [{ title: 't', summary: '事件要点。事件影响。' }] }],
     }).value
     const { text: t2 } = renderScript(r)
-    expect(t2).toContain('第一条，t。事件要点。事件影响。')
+    expect(t2).toContain('第一条，事件要点。事件影响。')
     expect(t2).not.toContain('。。')
   })
   it('条目与类别偏移指向正确文本起点', () => {
     expect(text.slice(itemOffsets[0], itemOffsets[0] + 4)).toBe('第一条，')
-    expect(text.slice(categoryOffsets[1], categoryOffsets[1] + 6)).toBe('接下来听AI')
+    expect(text.startsWith('接下来，将为您播报AI方面的新闻。', categoryOffsets[1])).toBe(true)
   })
   it('分块均不超上限、拼接等于原文', () => {
     const chunks = splitScriptChunks(text)
@@ -154,10 +145,10 @@ describe('单类别期次（不播类别引导语）', () => {
   const { text, categoryOffsets } = renderScript(single)
   const e = buildEdition(single, { id: 'n9', createdAt: 1000 })
 
-  it('开场后直接进第一条新闻，不再播「首先来听X」', () => {
-    expect(text).toContain('以下是今日国内要闻。第一条，政策发布。')
-    expect(text).not.toContain('首先来听')
-    expect(text).not.toContain('接下来听')
+  it('开场后直接进第一条新闻，不再播类别引导', () => {
+    expect(text).toContain('以下是今日国内要闻。第一条，国新办介绍相关政策要点。')
+    expect(text).not.toContain('方面的新闻')
+    expect(text).not.toContain('将为您播报')
   })
   it('类别偏移指向首条条目起点（目录跳转落到第一条新闻）', () => {
     expect(categoryOffsets.length).toBe(1)
@@ -314,6 +305,16 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope).toEqual({ categories: [], topics: ['AI'] })
   })
+  it('班次按触发时刻升序排列（乱序入参归一化）', () => {
+    const p = sanitizeSchedulePrefs({
+      shifts: [
+        { id: 'x', time: '12:30' },
+        { id: 'y', time: '09:00' },
+        { id: 'z', time: '08:00' },
+      ],
+    })
+    expect(p.shifts.map((s) => s.time)).toEqual(['08:00', '09:00', '12:30'])
+  })
   it('班次数上限 6', () => {
     const shifts = Array.from({ length: 9 }, (_, i) => ({ time: `0${i}:00` }))
     expect(sanitizeSchedulePrefs({ shifts }).shifts.length).toBe(LIMITS.shifts)
@@ -323,7 +324,7 @@ describe('sanitizeSchedulePrefs', () => {
     expect(sanitizeSchedulePrefs({ shifts: [] }, prev).prefVersion).toBe(3)
     expect(sanitizeSchedulePrefs({ shifts: [] }, prev).syncedVersion).toBe(3)
   })
-  it('model 字段规整（用户选的新闻会话模型）', () => {
+  it('model 字段规整（用户选的新闻采集模型）', () => {
     const p = sanitizeSchedulePrefs({ model: { provider: 'deepseek', model: 'deepseek-chat' } })
     expect(p.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
     // 非法/空 model → null（= 跟随当前活跃会话）

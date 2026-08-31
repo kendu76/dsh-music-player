@@ -57,10 +57,20 @@
   **收集结果一律进入本列表**（一期一行）。静默收集产生的、尚未播放过的期次标「待播」徽标
   ——这就是「收集好的数据列表」，用户从这里选择某一期播放（点行进详情，可播整期、播某类、
   或点某一条新闻单独播）。
-- **多任务混合展示**：不同班次/手动触发的期次在列表中**按时间倒序混排**，靠期次标题
-  （如「AI 新闻简报」vs「早间新闻播报」）与类别 chips 自然区分；v1 不做按任务分组或筛选
-  （保留策略上每组独立 7 期，见功能设计 §3）。
-- 每行：日期时间（今天显示「今天 · HH:MM」，更早显示「MM-DD · HH:MM」）+ 类别/条数 chips；整行可点进入详情。
+- **布局**：定时状态行与最近失败提示**固定在滚动区上方**（带分隔线的工具栏），滚动条
+  从卡片列表顶部开始、与卡片对齐；滚动只发生在卡片流里，状态行不随内容滚走。
+- **多任务混合展示**：不同班次/手动触发的期次在列表中**按时间倒序混排**（接口按
+  createdAt 降序返回，最新在最上）。班次期次标题由 Host 确定性命名为
+  「M月D日 HH:MM 新闻播报」（按时刻区分班次），对话直接播报的期次保留 agent 命名，
+  配合类别 chips 自然区分；v1 不做按任务分组或筛选（保留策略上每组独立 7 期，
+  见功能设计 §3）。
+- **播完自动切回原内容**：音乐/讲书/在线曲目播放中，新闻推送（班次自动播报或面板
+  「▶ 播放整期」）打断时，客户端先快照被打断的来源；新闻期次**自然播完**后自动
+  切回——讲书从进度续播，音乐/在线曲目从断点继续（各来源进度本就由 savePlayback
+  分键持久化，恢复直接借用现有续播机制）。新闻期间用户手动切走/停止则放弃恢复。
+- 每期为一张**卡片**（两行布局）：第一行标题（含「待播/正在播」徽标），第二行日期时间
+  （今天显示「今天 · HH:MM」，更早显示「MM-DD · HH:MM」）+ 类别/条数 chips；卡片任意
+  位置可点进入详情（右侧 ▶/🗑 按钮独立，不会误触）。
 - 「▶ 播放」直接开播该期（等价于点进详情后的播放整期）。
 - **今日徽标**：当天已生成期次的第一行行首显示「●」主题色圆点；若当期**尚未播放过**，
   圆点旁附「待播」小徽标（开播后消失）——覆盖「定时/静默收集时浏览器没开」与
@@ -158,7 +168,7 @@
 
 ### 4.1 交互细节
 
-- **新闻会话模型**（「启用每日定时」下方）：provider → model 两级下拉，数据来自
+- **新闻采集模型**（「启用每日定时」下方）：provider → model 两级下拉，数据来自
   `GET /dsh-music/news/models`；不选 = 跟随当前活跃会话模型。该模型用于创建专用
   「新闻简报」会话（见 §4.2），保存在 `schedulePrefs.model`。
 - **班次行**：时间为 `<input type="time">`（步进 1 分钟）；**「收集后立即播放」勾选框，
@@ -166,13 +176,18 @@
   （只生成/更新期次不出声，进入待播列表，见 §3.1）。行尾 [▶] **立即执行**、[🗑] 删除
   （至少保留一个班次才可启用）。
 - **立即执行（▶）**：按**该班次当前的配置**（收集范围、是否勾选立即播放）立刻跑一轮，
-  不等时刻；期次标题按当前时段与范围命名。因面板无直达会话通道（见 §4.2），点击后弹
-  确认气泡：一键复制形如 *「立即执行我的 12:30 新闻班次：只收集科技与 AI 相关头条，
-  收集完不播放」* 的精确指令，用户发送给 agent 后立即按规则执行（走 `news_broadcast`）。
-  **连点多次无副作用**（按钮仅复制，5 秒内重复点击只 toast 一次）；同一班次冷却窗
-  （10 分钟）内重复执行会被工具层跳过并提示，`force` 指令可强制重收（见功能设计 §5.1）。
+  不等时刻；期次标题固定为「M月D日 + 班次时刻 + 新闻播报」（Host 侧确定性命名）。
+  点击直接 `POST /dsh-music/news/run-now`（agents 服务不可用等失败时回退为复制指令，
+  用户发送给 agent 后按规则执行，走 `news_broadcast`）。
+- **执行中状态与防重复触发**：收集运行时列表页签状态行显示「· {班次 id|手动} 收集中…」，
+  定时编辑器内所有班次的 ▶ 置灰并显示 **⟳**（title「收集进行中，请稍候」），5s 轮询
+  自动恢复。服务端为**单收集槽位**：运行中再触发（`run-now` 或定时到点）一律拒绝
+  （`busy`，不新建执行会话），定时撞车跳过本轮并留日志；`runState` 带 10 分钟 TTL，
+  agent 漏报失败时自动复位不会卡死。同一班次冷却窗（10 分钟）内重复提交仍会被
+  `news_broadcast` 工具层跳过，`force` 可强制重收（见功能设计 §5.1）。
 - **添加班次**：弹窗新增，默认 `08:00 · 勾选立即播放 · 不选任何类别`；上限 6 个
-  （成本与可读性平衡，超出置灰）。
+  （成本与可读性平衡，超出置灰）。班次列表**按触发时刻升序**排列（与创建先后无关，
+  面板展示与持久化顺序均已归一化）。
 - **收集范围（班次级，编辑弹窗内设置）**：
   - **预设类别 chips**：热点（排第一，跨领域+热度排序）/ 国内 / 国际 / 科技 / 财经 / 体育 / 娱乐 多选；
   - **自定义主题**：自由文本 tag（如 `AI`、`新能源汽车`、`美股`），每班次 ≤ 5 个。
@@ -195,7 +210,7 @@
 读 `schedulePrefs.shifts`，Node `setInterval` 每 30s 检查，到点触发 `runCollection`）——
 无需 agent 创建/同步 DSH 定时任务、无需手动开会话。
 每次执行（定时到点 / 面板「▶ 立即执行」`POST /dsh-music/news/run-now`）都经统一入口
-`runCollection` **新建一个「执行会话」**（`ctx.agents.create`，模型取「新闻会话模型」
+`runCollection` **新建一个「执行会话」**（`ctx.agents.create`，模型取「新闻采集模型」
 选择器或当前活跃会话，`setup` 里 mount 默认 preset 以装配 `web_search` 等），再把收集
 指令作为 user 消息通过 `agent.followup()` 注入该执行会话。结果（期次/失败）绑定该
 执行会话 id；**删除某期新闻时联动销毁它对应的执行会话**。
@@ -331,8 +346,8 @@ agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板�
 |---|---|
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
-| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, model:{provider,model}?, shifts:[{id,time,autoplay,scope:{categories[],topics[]}}], prefVersion, syncedVersion }`，班次 `scope` 必填（至少一个类别或主题；全局 `defaultScope` 已退役，旧数据空范围由 Host 规整为全选六类），`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
-| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`POST /dsh-music/news/purge-stale`（每日 03:00 / 启动清理同一入口：删除今天之前的期次与失败记录并归档会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`/`rebuildCleanupTimer()`（Host 端：每次执行新建执行会话并归入「新闻收集」工作区分组、统一入口、自维护定时器与每日清理定时器） |
+| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, model:{provider,model}?, shifts:[{id,time,autoplay,scope:{categories[],topics[]}}], prefVersion, syncedVersion }`，班次 `scope` 必填（至少一个类别或主题；全局 `defaultScope` 已退役，旧数据空范围由 Host 规整为全选六类），`model` 为「新闻采集模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
+| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`POST /dsh-music/news/purge-stale`（每日 03:00 / 启动清理同一入口：删除今天之前的期次与失败记录并归档会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻采集模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`/`rebuildCleanupTimer()`（Host 端：每次执行新建执行会话并归入「新闻收集」工作区分组、统一入口、自维护定时器与每日清理定时器） |
 | 提示词 | news 系统提示词 section 说明收集流程与失败处理；定时为 Host 自维护，引导用户到面板配置 |
 | 工具 | `news_broadcast` 之外保留轻量 `news_schedule`（action: get / reportFailure），供执行会话查询偏好与上报收集失败；不再有 begin / markSynced / 同步语义 |
 | intent 分支 | `intent.kind === 'news'` → `pendingId = 'news:'+id`，走 book 同构的加载/播放管线（换 URL 前缀 `/dsh-music/news/`） |
