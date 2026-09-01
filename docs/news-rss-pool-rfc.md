@@ -69,8 +69,8 @@
 
 设计要点：
 
-- **拉取与收集解耦**：拉取器按自己的节奏（默认每 30 分钟）运行，与班次触发（每天几次）无关。
-  到点收集时池里已经躺着最近 30 分钟的条目，agent 直接筛选，快且省。
+- **懒拉取（收集前同步拉）**：无后台定时器——每次新闻收集执行（`runCollection`）前先同步
+  `pullPoolOnce()` 拉一轮最新条目，再组装收集指令；agent 筛的就是刚拉到的新鲜数据，快且省。
 - **agent 仍是唯一整理者**：池只是「喂料」；去重/筛选/摘要/分类/口播全部保持 agent 在环
   （方案 A 的既定架构不动）。
 - **两路并行的切换策略**：池是主路（确定、低成本、有 pubDate），`web_search` 是补盲
@@ -90,7 +90,6 @@
   "version": 2, // 1 → 2：新增 rss 段
   "rss": {
     "enabled": true,                       // 总开关；关闭 = 完全不拉取，退回纯 web_search
-    "pollMinutes": 30,                     // 拉取节奏（15–180，默认 30）
     "feeds": [
       {
         "id": "xinhuashe",                 // 稳定 id（slug），不可变；默认池内置
@@ -146,16 +145,16 @@
   - `major` 权威媒体：有编辑把关的主流/垂直媒体（IT之家、量子位、少数派）。
   - `secondary` 优质二手源：聚合/解读类（后续可选，默认池不配）。
   - `kol` 个人/KOL：不进默认池，仅自定义主题兜底（§5.4）。
-- **配置入口**：面板「⏰ 每日定时」下新增「信源池」小节（默认池开关 + 增删自定义 feed +
-  拉取节奏）。自定义 feed 表单：URL + 分级 + 主投类别 + 名称。范围：`rss.feeds` 上限 30 个
-  （默认 10 + 自定义 20），`pollMinutes` 15–180。
+- **配置入口**：面板「信源池配置」子视图（默认池开关 + 增删自定义 feed + 恢复暂停源）。
+  自定义 feed 表单：URL + 分级 + 主投类别 + 名称。范围：`rss.feeds` 上限 30 个
+  （默认 10 + 自定义 20）。**无拉取节奏配置**——池数据在每次收集执行前懒拉取。
 - **面板展示**：新闻页签新增一行「信源池」状态（源数 / 池内条目 / 最近拉取时间 / 失败数），
   失败源可单独停用。详见 §9。
 
 ### 3.3 池条目保留与清理
 
 - **只保留增量**：`pool.items` 只存「进入池后尚未进入任何期次」的条目（`usedIn` 为空）。
-  进入期次后置 `usedIn`，由下一轮清理（30 分钟轮询）摘除——池子不膨胀，且「未用过」的
+  进入期次后置 `usedIn`，由下一次拉取后的清理摘除——池子不膨胀，且「未用过」的
   条目在下一班次仍可用（如高频静默班次与低频播报班次共享池）。
 - **生命周期上限**：`pool.items` ≤ 500 条（老条目在拉取成功后按 `firstSeen` 淘汰，
   防单次故障期间堆积）。
@@ -167,20 +166,20 @@
 
 ---
 
-## 4. Host 拉取节奏（RSS 拉取器）
+## 4. Host 懒拉取（RSS 拉取器）
 
-### 4.1 调度（复用现有 timer 模式）
+### 4.1 调度（懒加载，无后台定时器）
 
-与现有 `rebuildTimer`（30s 检查班次）/ `rebuildCleanupTimer`（03:00 清理）同构，新增
-`rebuildPoolTimer`：
+**不做轮询定时器**——池数据只在「要用了」的时刻去获取：每次新闻收集执行（`runCollection`）
+组装指令前，先同步 `pullPoolOnce()` 拉一轮（池启用且无并发拉取时），随后注入
+【信源池材料】。这与节假日日历的懒拉取同一原则：**没跑新闻收集就不产生任何 RSS 请求**，
+无需手动刷新、无「拉取节奏」配置。
 
 ```
 触发点：
-  1) 插件启动时（loadNews 后）立即拉取一轮（fresh pool）
-  2) 之后按 rss.pollMinutes（默认 30 分钟）轮询拉取
-  3) 面板保存 rss 配置（增删 feed / 改节奏 / 开关）→ rebuildPoolTimer 重建
-实现：setInterval 每 30s 检查「距上次成功拉取 ≥ pollMinutes」→ 触发一轮（与班次定时器同节奏）
-清理：ctx.effect 注册 dispose（与 newsTimer / newsCleanupTimer 一致）
+  1) 每次 runCollection（定时到点 / 面板「▶ 立即执行」）收集前
+实现：直接 await pullPoolOnce()（内部 poolPulling 防重入；失败静默降级 → 不注入池材料）
+清理：无定时器，无 dispose 需求
 ```
 
 ### 4.2 一轮拉取流程
@@ -408,28 +407,23 @@ normalizeTitle(title):
 
 ### 9.1 新增 API
 
-| 路由 | 方法 | 作用 |
-|---|---|---|
-| `GET /dsh-music/news/rss` | GET | 信源池配置 + 池状态摘要（feeds/条目数/最近拉取/feed 失败） |
-| `POST /dsh-music/news/rss` | POST | 保存信源池配置（增删 feed / 改节奏 / 开关）→ rebuildPoolTimer |
-| `POST /dsh-music/news/rss/pull` | POST | 手动立即拉取一轮（面板「立即拉取」按钮） |
-| `POST /dsh-music/news/rss/resume` | POST | 手动恢复被自动停用的源（清 suspendedUntil） |
+**无信源池相关 API。** RSS 信源池**没有任何 UI 与配置接口**（无状态行、无配置子视图、
+无 `GET/POST /news/rss`、无 `/rss/resume`）——由 Host 在后台自动懒拉取使用，默认内置
+10 源、默认开启，无需用户配置。池配置仅从持久化文件读取（旧版本用户改过的配置仍加载，
+新装直接使用默认池）。
 
 - 校验：`sanitizeRssPrefs` 纯函数入 `news-core.js`（feed id 生成/去重、URL 合法性、
-  tier/category 白名单、pollMinutes 15–180、feeds ≤30），与 `sanitizeSchedulePrefs` 同风格。
+  tier/category 白名单、feeds ≤30），与 `sanitizeSchedulePrefs` 同风格。`pollMinutes` 已退役
+  （懒拉取，无后台定时器），旧配置该字段被丢弃。
 - 持久化：并入 `music-player-news.json` 的 `rss` + `pool` 段（version 2），
   `saveNews` 一并写（`pool.items` 每次拉取后 saveNews——与期次同文件，避免新增文件）。
-- 池状态摘要（`poolSummary()`）：新条目数、各源最新 pubDate、失败源列表——供面板状态行
-  与收集指令注入共用。
+- 池材料注入：`runCollection` 收集前懒拉取后，按班次范围 `filterPoolForScope` 预筛并注入
+  【信源池材料】；对话直接播报经 `news_schedule {action:'pool'}` 获取同一材料。
 
 ### 9.2 面板变更（新闻页签）
 
-- 定时状态行下方新增常驻「信源池」行：
-  `📡 信源池 10 源 · 池内 23 条 · 30 分钟前更新 [立即拉取] [配置]`
-  失败时：`⚠ 2 源拉取失败（IT之家 · 超时）[详情]`；自动停用源显示「已暂停」。
-- 「配置」进入子视图（与定时规则编辑器同导航模式）：总开关、拉取节奏、feed 列表
-  （增/删/启停/分级/归属类别或主题/手动立即拉取）、失败列表与「恢复」按钮。
-- 新闻页签空态文案补一句：「配置 RSS 信源池可让收集更快更稳（可选）」。
+**无信源池呈现**——新闻页签只保留「定时状态行 + 期次列表」，不新增任何池状态行/配置入口。
+RSS 信源池对用户完全透明：Host 每次收集前在后台自动拉取使用。
 
 ---
 
@@ -440,7 +434,7 @@ normalizeTitle(title):
 | 文件 | 变更 |
 |---|---|
 | `lib/news-core.js` | 新增：`normalizeTitle`、`bigramJaccard`、`dedupeItemsAgainst`（工具层去重纯函数）、`sanitizeRssPrefs`、`parseRssXml`（轻量 XML 提取）、`poolSummary`、`prunePool`（48h/500 条/usedIn 清理）、`filterPoolForScope`（注入过滤） |
-| `lib/index.js` | 新增：`rebuildPoolTimer` / `pullPoolOnce`（Host 拉取器）、`rss` 路由 4 条、`news_broadcast.execute` 里插入去重调用、`runCollection` 注入池摘要、`saveNews`/`loadNews` 读写 `rss`/`pool` 段 |
+| `lib/index.js` | 新增：`pullPoolOnce`（懒拉取器，由 `runCollection` 收集前调用）、`rss` 路由 3 条、`news_broadcast.execute` 里插入去重调用、`runCollection` 注入池摘要、`saveNews`/`loadNews` 读写 `rss`/`pool` 段 |
 | 提示词 | §8 新增「信源池」小节（§5.3）+ 两阶段流水线改写（§8.1） |
 | `docs/daily-news-briefing-design.md` | 标记 §8.5 演进落地；补充本 RFC 链接 |
 | `docs/daily-news-briefing-ui.md` | §9.2 面板变更 |
@@ -450,12 +444,12 @@ normalizeTitle(title):
 ### 10.2 里程碑
 
 - **M-R1 Host 池骨架**：`parseRssXml` / `sanitizeRssPrefs` / `prunePool` / `poolSummary` 纯函数 +
-  单测；`rebuildPoolTimer` + `pullPoolOnce` + rss 路由（配置读写/手动拉取）。
-- **M-R2 收集接入**：`runCollection` 注入池摘要 + 提示词 §5.3/§8.1 更新；手动播报/定时班次
-  双路径联调。
+  单测；`pullPoolOnce` + rss 路由（配置读写）。
+- **M-R2 收集接入**：`runCollection` 收集前懒拉取池摘要 + 提示词 §5.3/§8.1 更新；手动播报/
+  定时班次双路径联调。
 - **M-R3 工具层去重**：`normalizeTitle` / `bigramJaccard` / `dedupeItemsAgainst` + 单测；
   `news_broadcast` 接入 + notice 输出；官方源升级替换。
-- **M-R4 面板**：信源池状态行 + 配置子视图 + 立即拉取/恢复按钮；UI 文档更新。
+- **M-R4 面板**：**无信源池 UI**（状态行/配置子视图/API 均不提供）——池对用户完全透明，Host 后台自动使用。
 
 ### 10.3 风险与回退
 
@@ -465,7 +459,7 @@ normalizeTitle(title):
 | XML 解析器过简（非标准 feed） | 只兼容 RSS 2.0 `<item>` + Atom `<entry>`（99% 覆盖）；解析失败按单源失败处理 |
 | 池条目污染（摘要含广告/无关内容） | 摘要截断 80 字 + 过滤「广告/推广」关键词；最终取舍仍由 agent 把关 |
 | 注入过长撑爆消息体 | 注入上限 60 条 + 摘要 80 字截断 + 按 scope 预过滤 |
-| 池拉取加重 Host 负担 | 30 分钟一次、并发 ≤4、15s 超时；单轮全失败即跳过，无重试风暴 |
+| 池拉取加重 Host 负担 | 仅收集执行时懒拉、并行、15s 超时；单轮全失败即跳过，无重试风暴；未用收集零请求 |
 | 去重误杀（不同事件标题相似） | 相似度阈值保守（Jaccard ≥ 0.7）+ 仅当日比对 + notice 透明报告丢弃条目，用户可见可纠 |
 
 ### 10.4 明确不做（本期）
@@ -481,8 +475,8 @@ normalizeTitle(title):
 | 项 | 决定 |
 |---|---|
 | 架构 | Host 侧拉取 + agent 在环整理，不动方案 A 骨架；池是「可选加强」非「必需前置」 |
-| 默认池规模 | 内置 10 源（official 7 + major 3），用户可增删至 ≤30 |
-| 拉取节奏 | 默认 30 分钟（15–180 可配），独立于班次触发；启动即拉一轮 |
+| 默认池规模 | 内置 10 源（official 7 + major 3），开箱即用；无 UI 配置，Host 后台直接使用 |
+| 拉取节奏 | **懒拉取**：无后台定时器、无手动刷新——每次新闻收集执行前 `runCollection` 同步拉一轮 |
 | 池条目保留 | 未用条目 ≤500 条、48h 过期；已用条目摘除（usedIn） |
 | 去重 | 工具层硬约束：标题归一化 + bigram Jaccard ≥0.7 + 当日比对（本期次内 ∪ 当日已有期次）；official 源可升级替换 |
 | 深抓配额 | 每类 ≤2 条、全期 ≤6 条（默认），随 itemCount 线性放宽 |
@@ -495,18 +489,24 @@ normalizeTitle(title):
 
 | 里程碑 | 落点 | 说明 |
 |---|---|---|
-| M-R1 池骨架 | `lib/news-core.js`：`DEFAULT_RSS_FEEDS` / `RSS_TIERS` / `sanitizeRssPrefs` / `parseRssXml` / `parseRssDate` / `mergePoolItems` / `prunePool` / `filterPoolForScope` / `poolSummary` / `normalizeFeedUrl` / `decodeRssEntities`；`lib/index.js`：`rss`+`pool` 持久化段（version 2）、`rebuildPoolTimer` / `pullPoolOnce` / `recordFeedFailure`（连续 3 次自动停用 24h）、`poolStatus`、4 条 rss 路由 | 默认池 10 源开箱即用（2026-09 实测全部今日新鲜，见 §3.2）；拉取与班次定时解耦（默认 30 分钟，启动延迟 60s 拉首轮，避免污染测试 fetch stub）；`pullPoolOnce` 不内部 `loadNews`（与 purgeStaleNews 同一约束，防并发覆盖） |
-| M-R2 收集接入 | `runCollection` 按班次范围 `filterPoolForScope` 预筛池条目、注入【信源池材料】；系统提示词新增「信源池优先 + 两阶段收集」小节 | 池是「可选加强」非「必需前置」——无池/池空时指令不注入，agent 走纯 web_search |
+| M-R1 池骨架 | `lib/news-core.js`：`DEFAULT_RSS_FEEDS` / `RSS_TIERS` / `sanitizeRssPrefs` / `parseRssXml` / `parseRssDate` / `mergePoolItems` / `prunePool` / `filterPoolForScope` / `poolSummary` / `normalizeFeedUrl` / `decodeRssEntities`；`lib/index.js`：`rss`+`pool` 持久化段（version 2）、`pullPoolOnce` / `recordFeedFailure`（连续 3 次自动停用 24h） | 默认池 10 源开箱即用（2026-09 实测全部今日新鲜，见 §3.2）；懒拉取：无后台定时器，仅在收集执行时拉（与节假日日历同一原则）；`pullPoolOnce` 不内部 `loadNews`（与 purgeStaleNews 同一约束，防并发覆盖） |
+| M-R2 收集接入 | `runCollection` 收集前懒拉取、按班次范围 `filterPoolForScope` 预筛池条目、注入【信源池材料】；系统提示词新增「信源池优先 + 两阶段收集」小节 | 池是「可选加强」非「必需前置」——无池/池空/拉取失败时指令不注入，agent 走纯 web_search |
 | M-R3 工具层去重 | `lib/news-core.js`：`normalizeTitle` / `bigrams` / `unigrams` / `setJaccard` / `bigramJaccard` / `unigramJaccard` / `titlesDuplicate` / `dedupeItemsAgainst`；`news_broadcast.execute` 在 sanitize → 冷却窗之间插入去重（比对本批次 ∪ 当日已有期次），official 源升级替换（旧期次数据层移除 + notice 报告） | 中文短标题适配：unigram 补 bigram 单信号；数字编号（第1号/第10号）不做包含判断；去数字后同模板视为编号差异不误杀 |
-| M-R4 前端 | `lib/client.js` NewsPane：信源池状态行（📡 源数/池内/最近拉取/失败/暂停 + ⟳ 立即拉取）+ 信源池配置子视图（总开关/节奏/源增删启停分级类别/恢复暂停源）；`LIMITS_NEWS` 增 rss 常量 | 与定时编辑器同导航模式；保存即 POST /news/rss 重建拉取定时器 |
-| 文档 | `docs/news-rss-pool-rfc.md`（本文件）、`daily-news-briefing-design.md`（M5 已实现）、`daily-news-briefing-ui.md`（§3.1 状态行 + §4.3 配置子视图）、`README.md`（信源池 + 工具层去重条目） | — |
-| 测试 | `test/news-rss.test.js`（28）+ `test/news-dedup.test.js`（16）+ `news-routes.test.js`（RSS 路由 + 去重集成 4）+ `client.test.js`（信源池状态行/配置子视图冒烟）；全量 627 通过 | 路由测试 stub 全局 fetch 返回假 RSS，避免真网络 |
+| M-R4 前端 | `lib/client.js` NewsPane：**无信源池 UI**（不渲染状态行/配置子视图，无相关 fetch/state/路由调用） | 池对用户完全透明——界面无任何 RSS 信源池呈现，Host 后台自动懒拉取使用 |
+| 文档 | `docs/news-rss-pool-rfc.md`（本文件）、`daily-news-briefing-design.md`（M5 已实现）、`daily-news-briefing-ui.md`（无信源池 UI）、`README.md`（信源池 + 工具层去重条目） | — |
+| 测试 | `test/news-rss.test.js`（31）+ `news-routes.test.js`（懒拉取集成 + 去重集成）+ `client.test.js`（无信源池 UI）；全量通过 | Host 懒拉取测试 stub 全局 fetch 返回假 RSS，避免真网络 |
 
 ### 与 RFC 正文的偏差
 
 1. **`prunePool` 的 publishedAt 超龄判定**（§3.3，二次修正）：初版加了 1h 入库宽限（防刚拉的旧条目被裁），实测发现**方向反了**——停更源残留的旧闻（人民网 2025-06 缓存）正是污染源，宽限反而让它们留在池里毒化 agent。改为**发布 > 48h 直接淘汰，无宽限**：池定位当日新闻，拉取成功后立即 prune 即清走旧闻。
 2. **`titlesDuplicate` 加了数字编号守卫**（§7.3）：纯字母数字标题（t1/t10）与「第1号/第10号」类编号标题不做包含/Jaccard 误判——去重宁可漏不可错杀，误杀会丢新闻。
-3. **`rebuildPoolTimer` 启动首轮延迟 60s**（§4.1）：避免 `apply()` 同步触发拉取污染测试环境的全局 fetch stub（/lyric/online 用例断言 fetch 调用次数）；产品侧 1 分钟即可用上首轮池数据，面板另有「立即拉取」。
-4. **`runCollection` 池新鲜度保障**（§5.2，实测踩坑修复）：用户点「▶ 立即执行」时若池从未拉取或距上次拉取 ≥ 拉取节奏，`runCollection` 先同步 `pullPoolOnce()` 再组装指令——否则首拉 60s 延迟未到、池为空，注入不了【信源池材料】，RSS 池对「开机后立即执行」的班次形同虚设（实测：18:20 点执行时池还是空的，会话指令里无池材料，期次 8 条 0 条来自池）。拉取失败静默降级（池空 → 不注入，agent 走 web_search）。
+3. **移除后台拉取定时器，改为收集前懒拉取**（§4.1，架构变更）：早期版本有 `rebuildPoolTimer`
+   （默认 30 分钟轮询 + 启动 60s 首拉，并因测试环境 stub 全局 fetch 做首拉延迟）。后改为
+   **懒加载**：无后台定时器、无启动拉取，`runCollection` 每次收集前同步 `pullPoolOnce()`——
+   没跑新闻收集就不产生任何 RSS 请求；「立即拉取」按钮与 `/news/rss/pull` 路由一并移除。
+4. **`runCollection` 池新鲜度保障 → 升级为懒拉取主机制**（§5.2）：早期版本按「距上次拉取 ≥
+   拉取节奏」才在收集前补拉（配合后台定时器）。懒加载改造后，收集前**无条件**同步
+   `pullPoolOnce()`，保证每次注入的【信源池材料】都是刚拉到的最新数据；拉取失败静默降级
+   （池空 → 不注入，agent 走 web_search）。
 5. **`news_schedule` 新增 `action:'pool'`**（§5.2）：agent 在**对话直接播报**（不走 runCollection）时主动调 `news_schedule {action:'pool'}` 获取【信源池材料】（可传 categories/topics 过滤）——对话播报此前完全没有池注入通道，提示词「信源池优先」成了空话。系统提示词第 0 条明确要求每次收集先调 pool。
 6. **默认池必须「今日新鲜」而非仅「可解析」**（§3.2，实测踩坑）：首版验证只看 HTTP 200 + `parseRssXml` 能解析 + 有时间锚，**没检查时间锚是否新鲜**——人民网 5 频道（2025-06 停更）、新浪科技/体育（2018 停更）全被误收进默认池，agent 按「存疑即弃」全丢。二次验证改为「最新条目 pubDate 距今 < 2 天」，默认池换为中新网 7 频道 + IT之家/量子位/少数派（10 源全部今日新鲜）。新增 `DEFAULT_RSS_FEEDS_VERSION=2`：未手工改过的旧配置自动升级新默认池（`custom` 标记区分用户是否改过）。

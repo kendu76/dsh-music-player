@@ -151,15 +151,6 @@ const newsScheduleDefault = {
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
 let newsFailuresServer = [] // 最近收集失败（非空时新闻列表页定时状态行下方显示失败提示行）
 let newsRunState = null // 收集运行态（null=空闲；非 null 时面板显示「收集中」并禁用 ▶）
-// RSS 信源池 fixture（RFC §9）：默认池 + 状态（NewsPane 信源池状态行 / 配置子视图）
-let newsRssServer = {
-  enabled: true, pollMinutes: 30,
-  feeds: [
-    { id: 'xinhuashe', title: '新华社', tier: 'official', category: '国内', url: 'https://rss.news.cn/x.xml', enabled: true },
-    { id: 'ithome', title: 'IT之家', tier: 'major', category: '科技', url: 'https://www.ithome.com/rss/', enabled: true },
-  ],
-}
-let newsRssStatus = { enabled: true, pollMinutes: 30, feedCount: 2, poolSize: 5, fetchedAt: Date.now(), suspended: [], failures: [] }
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
@@ -169,23 +160,6 @@ async function fetchStub(url, opts) {
   }
   if (u === '/dsh-music/news/runstate') {
     return jsonRes({ ok: true, run: newsRunState })
-  }
-  // ---- RSS 信源池（RFC §9）：配置 + 状态（NewsPane 信源池状态行 / 配置子视图）----
-  if (u === '/dsh-music/news/rss') {
-    if (o && o.method === 'POST') {
-      const body = JSON.parse(o.body || '{}')
-      newsRssServer = body
-      return jsonRes({ ok: true, rss: newsRssServer, status: newsRssStatus })
-    }
-    return jsonRes({ ok: true, rss: newsRssServer, status: newsRssStatus })
-  }
-  if (u === '/dsh-music/news/rss/pull' && o && o.method === 'POST') {
-    return jsonRes({ ok: true, added: 3, total: newsRssStatus.poolSize + 3, status: { ...newsRssStatus, poolSize: newsRssStatus.poolSize + 3 } })
-  }
-  if (u === '/dsh-music/news/rss/resume' && o && o.method === 'POST') {
-    const body = JSON.parse(o.body || '{}')
-    newsRssServer = { ...newsRssServer, feeds: (newsRssServer.feeds || []).map((f) => (f.id === body.feedId ? { ...f, suspendedUntil: undefined } : f)) }
-    return jsonRes({ ok: true, rss: newsRssServer })
   }
   if (u === '/dsh-music/news/failures/clear' && o && o.method === 'POST') {
     const cleared = newsFailuresServer.length
@@ -8610,42 +8584,6 @@ describe('news pane（新闻播报页签）', () => {
       // 卡片两行布局：标题行 + 元信息行（时间 · 类别 chips）
       expect(playedRow.querySelector('.dsh-music-news-card-title')).toBeTruthy()
       expect(playedRow.querySelector('.dsh-music-news-card-meta').textContent).toContain('热点 4')
-    } finally { }
-  })
-
-  it('信源池状态行渲染 + 配置子视图（RFC §9.2）', async () => {
-    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
-    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    const root = createRoot(container)
-    act(() => { root.render(React.createElement('div', null, bar, panel)) })
-    try {
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
-      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 状态行：📡 信源池 + 源数/池内条数 + 立即拉取按钮
-      expect(container.textContent).toContain('📡 信源池')
-      expect(container.textContent).toContain('2 源')
-      expect(container.textContent).toContain('池内 5 条')
-      // 进入配置子视图
-      const poolBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('📡 信源池'))
-      act(() => { poolBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 配置：总开关 + 拉取节奏 + 源列表（名称/URL 在 input value 中，分级/类别为 select）
-      expect(container.textContent).toContain('启用信源池')
-      expect(container.textContent).toContain('拉取节奏')
-      const inputs = [...container.querySelectorAll('.dsh-music-news-pane-inner input')]
-      const inputValues = inputs.map((i) => i.value).filter(Boolean)
-      expect(inputValues).toEqual(expect.arrayContaining(['新华社', 'IT之家', 'https://rss.news.cn/x.xml']))
-      expect(container.textContent).toContain('官方源') // tier select option
-      expect(container.textContent).toContain('权威媒体')
-      // 返回列表
-      const backBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '← 返回')
-      act(() => { backBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      expect(container.textContent).toContain('⏰ 每日定时')
     } finally { }
   })
 

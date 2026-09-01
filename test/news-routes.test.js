@@ -377,15 +377,19 @@ describe('news_broadcast 工具层去重（RFC §7）', () => {
   })
 
   it('official 源升级替换：当日旧期次同事件条目被移除（更权威优先）', async () => {
-    const { handler, newsBroadcast, cleanup } = boot()
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    // 池配置经持久化文件预置（无配置 API）——含 official 级新华社，使 sourceRank 生效。
+    const file = join(home, '.dsh', 'music-player-news.json')
+    mkdirSync(join(home, '.dsh'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      version: 2,
+      editions: [], schedulePrefs: {}, runState: null, failures: [],
+      rss: { enabled: true, defaultVersion: 2, custom: true, feeds: [
+        { id: 'xinhuashe', title: '新华社', tier: 'official', category: '国内', url: 'https://rss.news.cn/x.xml' },
+      ] },
+    }), 'utf8')
+    const { handler, newsBroadcast, cleanup } = boot({ home })
     try {
-      // 先配置信源池（含 official 级新华社），使 sourceRank 生效。
-      await handler(makeReq({
-        method: 'POST', url: '/dsh-music/news/rss',
-        body: JSON.stringify({ enabled: true, feeds: [
-          { id: 'xinhuashe', title: '新华社', tier: 'official', category: '国内', url: 'https://rss.news.cn/x.xml' },
-        ] }),
-      }), makeRes())
       // 第一期：央视（major 2）报同事件。
       const r1 = await broadcast(newsBroadcast, {
         ...NEWS_BODY,
@@ -410,7 +414,7 @@ describe('news_broadcast 工具层去重（RFC §7）', () => {
       const editions = JSON.parse(res.body).editions
       const first = editions.find((e) => e.id === r1.editionId)
       expect(first.totalItems).toBe(0)
-    } finally { cleanup() }
+    } finally { cleanup(); rmSync(home, { recursive: true, force: true }) }
   })
 
   it('批内重复（同一提交措辞不同）被剔除', async () => {
@@ -777,48 +781,27 @@ describe('news 路由', () => {
   })
 })
 
-describe('RSS 信源池路由', () => {
-  it('GET /news/rss 返回默认池 + 池状态（开箱即用）', async () => {
-    const { handler, cleanup } = boot()
+describe('RSS 信源池（Host 后台自动懒拉取，无 UI / 无配置 API）', () => {
+  it('收集执行前懒拉取 RSS：run-now 先拉池数据再收集，并注入【信源池材料】', async () => {
+    const agents = makeAgents({
+      agentsCreate: async (opts) => ({
+        agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) },
+      }),
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    // 池配置通过持久化文件预置（无配置 API，Host 后台直接用；单源避免 10 个默认源都打 stub）。
+    const file = join(home, '.dsh', 'music-player-news.json')
+    mkdirSync(join(home, '.dsh'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      version: 2,
+      editions: [], schedulePrefs: {}, runState: null, failures: [],
+      rss: { enabled: true, defaultVersion: 2, custom: true, feeds: [{ id: 'f1', url: 'https://example.com/rss', title: '测试源', tier: 'major', category: '国内' }] },
+    }), 'utf8')
+    const { handler, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} }, home })
     try {
-      const res = makeRes()
-      await handler(makeReq({ url: '/dsh-music/news/rss' }), res)
-      const data = JSON.parse(res.body)
-      expect(data.ok).toBe(true)
-      expect(data.rss.enabled).toBe(true)
-      expect(data.rss.feeds.length).toBe(10) // 内置默认池（实测今日新鲜，见 news-core DEFAULT_RSS_FEEDS）
-      expect(data.rss.pollMinutes).toBe(30)
-      expect(data.status.poolSize).toBe(0)
-    } finally { cleanup() }
-  })
-
-  it('POST /news/rss 保存配置：增删 feed / 节奏 clamp / 重建定时器', async () => {
-    const { handler, cleanup } = boot()
-    try {
-      const res = makeRes()
-      await handler(makeReq({
-        method: 'POST', url: '/dsh-music/news/rss',
-        body: JSON.stringify({ enabled: true, pollMinutes: 5, feeds: [
-          { url: 'https://a.com/rss', title: '源A', tier: 'official', category: '国内' },
-          { url: 'bad-url', title: '坏源' }, // 非法 → 丢弃
-        ] }),
-      }), res)
-      const data = JSON.parse(res.body)
-      expect(data.ok).toBe(true)
-      expect(data.rss.pollMinutes).toBe(15) // clamp 到下限
-      expect(data.rss.feeds).toHaveLength(1)
-      expect(data.rss.feeds[0].title).toBe('源A')
-      // 持久化：重新 GET 应读回
-      const res2 = makeRes()
-      await handler(makeReq({ url: '/dsh-music/news/rss' }), res2)
-      expect(JSON.parse(res2.body).rss.feeds[0].tier).toBe('official')
-    } finally { cleanup() }
-  })
-
-  it('POST /news/rss/pull 手动拉取一轮（stub fetch 返回 RSS → 条目入库）', async () => {
-    const { handler, cleanup } = boot()
-    try {
-      // stub 全局 fetch：返回一份 RSS 2.0，验证解析 + 增量入库 + 池状态。
+      // stub 全局 fetch：返回一份 RSS 2.0，验证「收集执行时」懒拉取 → 解析 → 增量入库。
       // pubDate 用「当前时间」而非固定日期——prunePool 会按 publishedAt 48h 淘汰旧闻，
       // 旧日期条目入池即被裁掉（池定位当日新闻）。
       const nowDate = new Date()
@@ -839,48 +822,23 @@ describe('RSS 信源池路由', () => {
         text: async () => FAKE_RSS,
       }))
       vi.stubGlobal('fetch', fetchStub)
-      // 先保存一个单源池配置（避免 10 个默认源都打 stub）。
+      // 配置一个班次（schedule 路由仍存在）。
       await handler(makeReq({
-        method: 'POST', url: '/dsh-music/news/rss',
-        body: JSON.stringify({ enabled: true, feeds: [
-          { id: 'f1', url: 'https://example.com/rss', title: '测试源', tier: 'major', category: '国内' },
-        ] }),
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's9', time: '18:00', autoplay: false, itemCount: 8, scope: { categories: ['国内'], topics: [] } }] }),
       }), makeRes())
+      // run-now → 收集执行前触发懒拉取（fetch 被调用），条目入库。
       const res = makeRes()
-      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/pull' }), res)
-      const data = JSON.parse(res.body)
-      expect(data.ok).toBe(true)
-      expect(data.added).toBe(2)
-      expect(data.total).toBe(2)
-      // 池状态可见
-      expect(data.status.poolSize).toBe(2)
-      // 再次拉取：增量去重，无新增
-      const res2 = makeRes()
-      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/pull' }), res2)
-      expect(JSON.parse(res2.body).added).toBe(0)
-    } finally { cleanup(); vi.unstubAllGlobals() }
-  })
-
-  it('POST /news/rss/resume 恢复被停用的源', async () => {
-    const { handler, cleanup } = boot()
-    try {
-      // 先保存一个带 suspendedUntil 的源
-      await handler(makeReq({
-        method: 'POST', url: '/dsh-music/news/rss',
-        body: JSON.stringify({ enabled: true, feeds: [
-          { id: 'f1', url: 'https://a.com/rss', title: '源A', tier: 'major', category: '科技', suspendedUntil: Date.now() + 3600000 },
-        ] }),
-      }), makeRes())
-      const res = makeRes()
-      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/resume', body: JSON.stringify({ feedId: 'f1' }) }), res)
-      const data = JSON.parse(res.body)
-      expect(data.ok).toBe(true)
-      expect(data.rss.feeds[0].suspendedUntil).toBeUndefined()
-      // 未知 feed → 404
-      const res2 = makeRes()
-      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/resume', body: JSON.stringify({ feedId: 'nope' }) }), res2)
-      expect(res2.status).toBe(404)
-    } finally { cleanup() }
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's9' }) }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      expect(fetchStub).toHaveBeenCalled()
+      // 懒拉取后条目已持久化入池（无池状态 API，直接查持久化文件）。
+      const saved = JSON.parse(readFileSync(file, 'utf8'))
+      expect(saved.pool.items.length).toBe(2)
+      // 收集指令注入了【信源池材料】（按班次范围预筛）。
+      expect(agents.injected.length).toBe(1)
+      expect(agents.injected[0].msg.content[0].text).toContain('信源池材料')
+    } finally { cleanup(); vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }) }
   })
 })
 

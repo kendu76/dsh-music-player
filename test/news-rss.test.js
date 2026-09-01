@@ -76,17 +76,19 @@ describe('normalizeFeedUrl', () => {
 })
 
 describe('sanitizeRssPrefs', () => {
-  it('首次（无 input）→ 内置默认池、默认节奏、默认开启', () => {
+  it('首次（无 input）→ 内置默认池、默认开启', () => {
     const r = sanitizeRssPrefs({})
     expect(r.enabled).toBe(true)
-    expect(r.pollMinutes).toBe(LIMITS.rssPollDefault)
     expect(r.feeds).toHaveLength(DEFAULT_RSS_FEEDS.length)
     expect(r.feeds[0].id).toBe('chinanews-china')
   })
-  it('节奏 clamp 到 15–180', () => {
-    expect(sanitizeRssPrefs({ pollMinutes: 5 }).pollMinutes).toBe(LIMITS.rssPollMin)
-    expect(sanitizeRssPrefs({ pollMinutes: 9999 }).pollMinutes).toBe(LIMITS.rssPollMax)
-    expect(sanitizeRssPrefs({ pollMinutes: 'abc' }).pollMinutes).toBe(LIMITS.rssPollDefault)
+  it('拉取节奏（pollMinutes）已退役：输出不再含该字段，入参/旧配置的该字段被丢弃', () => {
+    const r = sanitizeRssPrefs({ pollMinutes: 5 })
+    expect(r.pollMinutes).toBeUndefined()
+    // 旧配置带 pollMinutes → 同样被丢弃（不影响 feeds/开关）。
+    const old = sanitizeRssPrefs({}, { enabled: true, pollMinutes: 60 })
+    expect(old.pollMinutes).toBeUndefined()
+    expect(old.enabled).toBe(true)
   })
   it('非法 feed 丢弃、合法保留、重名 id 去重生成新 id', () => {
     const r = sanitizeRssPrefs({ feeds: [
