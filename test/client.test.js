@@ -8527,7 +8527,7 @@ describe('版本更新弹窗（What\'s New）', () => {
     }
   })
 
-  it('关于页「更新日志」可手动打开完整历史（history 模式不折叠）', async () => {
+  it('关于页「更新日志」可手动打开完整历史（history 模式：最新版展开、旧版本默认折叠）', async () => {
     vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
     manifest = wnManifest('seen') // seen：确认自动弹不会发生，弹出的只可能是手动入口
     await bootClient()
@@ -8543,11 +8543,19 @@ describe('版本更新弹窗（What\'s New）', () => {
       const viewBtn = await waitForText(container, '.dsh-music-about-btn', '查看')
       act(() => { viewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await waitForText(document.body, '.dsh-music-whatsnew-title', '更新日志')
-      // history 模式：中性标题（无 NEW 徽章）、完整历史直列（无折叠开关）
+      // history 模式：中性标题（无 NEW 徽章、无折叠开关）；最新版（v0.7.3）默认展开，
+      // 以前版本（v0.7.1）默认折叠——只显示版本头部，点击头部才展开其特性。
       expect(document.body.querySelector('.dsh-music-whatsnew-badge')).toBeNull()
       expect(document.body.querySelector('.dsh-music-whatsnew-hist-toggle')).toBeNull()
+      expect(document.body.textContent).toContain('新功能甲') // 最新版内容展开
+      expect(document.body.textContent).toContain('v0.7.1') // 旧版本头部可见
+      expect(document.body.textContent).not.toContain('旧版优化') // 旧版本特性默认折叠
+      // 点旧版本头部 → 展开其特性
+      const oldHead = [...document.body.querySelectorAll('.dsh-music-whatsnew-hist-head')]
+        .find((el) => el.textContent.includes('v0.7.1'))
+      act(() => { oldHead.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(document.body.textContent).toContain('旧版优化')
-      expect(document.body.textContent).toContain('v0.7.1')
     } finally {
       root.unmount(); container.remove()
     }
