@@ -68,4 +68,50 @@ describe('getTopListSongs pagination', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ json: async () => ({ status: -1 }) })))
     await expect(getTopListSongs('8888', {})).rejects.toThrow('酷狗榜单获取失败')
   })
+
+  it('大页请求自动翻页合并，一次拿全整榜（如 网络红歌榜 571 首）', async () => {
+    const urls = []
+    const totalSongs = 571
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      urls.push(String(url))
+      const u = new URL(url)
+      const page = parseInt(u.searchParams.get('page') || '1', 10)
+      const size = parseInt(u.searchParams.get('pagesize') || '30', 10)
+      const start = (page - 1) * size
+      const count = Math.max(0, Math.min(size, totalSongs - start))
+      const info = Array.from({ length: count }, (_, i) => ({
+        hash: String(start + i).padStart(32, '0'),
+        songname: '歌' + (start + i),
+        authors: [{ author_name: '歌手' }],
+        duration: 200,
+      }))
+      return { json: async () => ({ status: 1, data: { name: '网络红歌榜', total: totalSongs, info } }) }
+    }))
+    const r = await getTopListSongs('23784', {}, 0, 600)
+    expect(urls.length).toBe(2) // page=1(pagesize=500) + page=2(剩余 71)
+    expect(urls[0]).toContain('page=1')
+    expect(urls[0]).toContain('pagesize=500')
+    expect(urls[1]).toContain('page=2')
+    expect(r.songs.length).toBe(571)
+    expect(r.total).toBe(571)
+    expect(r.hasMore).toBe(false)
+    expect(r.songs[570].hash).toBe(String(570).padStart(32, '0'))
+  })
+
+  it('小页请求（≤100）不做自动合并，保持原有分页契约', async () => {
+    const urls = []
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      urls.push(String(url))
+      const u = new URL(url)
+      const size = parseInt(u.searchParams.get('pagesize') || '30', 10)
+      const info = Array.from({ length: 30 }, (_, i) => ({
+        hash: String(i).padStart(32, '0'), songname: '歌' + i, authors: [{ author_name: '歌手' }], duration: 200,
+      }))
+      return { json: async () => ({ status: 1, data: { name: 'TOP500', total: 500, info } }) }
+    }))
+    const r = await getTopListSongs('8888', {}, 0, 100)
+    expect(urls.length).toBe(1) // 不自动翻页
+    expect(r.songs.length).toBe(30)
+    expect(r.hasMore).toBe(true) // 30 < 500
+  })
 })

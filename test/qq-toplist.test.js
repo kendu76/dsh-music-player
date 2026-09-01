@@ -57,12 +57,22 @@ describe('getTopListSongs pagination', () => {
     expect(r.hasMore).toBe(false) // 90 + 10 = 100
   })
 
-  it('clamps num to [1,50] and defaults offset to 0', async () => {
+  it('clamps num to [1,500] and defaults offset to 0', async () => {
     const getLastBody = stubFetch(50, 200)
     await getTopListSongs(62, '', -5, 999)
     const body = getLastBody()
     expect(body.req_0.param.offset).toBe(0) // negative offset clamped
-    expect(body.req_0.param.num).toBe(50)   // num capped at 50
+    expect(body.req_0.param.num).toBe(500)  // num capped at 500 (old: 50)
+  })
+
+  it('大 num 一次拿全整榜（热歌榜 299 首：num≥total 全量返回、hasMore=false）', async () => {
+    const getLastBody = stubFetch(299, 299)
+    const r = await getTopListSongs(26, '', 0, 300)
+    const body = getLastBody()
+    expect(body.req_0.param).toMatchObject({ topId: 26, offset: 0, num: 300 })
+    expect(r.songs.length).toBe(299)
+    expect(r.total).toBe(299)
+    expect(r.hasMore).toBe(false) // 0 + 299 >= 299
   })
 
   it('throws on a non-zero code', async () => {
