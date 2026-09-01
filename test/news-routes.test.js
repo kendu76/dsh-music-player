@@ -232,8 +232,8 @@ describe('news_broadcast 工具', () => {
       const mk = () => ({
         title: 'x', shiftId: 's1', date: '2026-05-30',
         categories: [
-          { name: '科技', items: [{ title: 't1', summary: 's', source: 'a' }] },
-          { name: 'AI', items: [{ title: 't2', summary: 's', source: 'b' }, { title: 't3', summary: 's', source: 'c' }] },
+          { name: '科技', items: [{ title: '科技进展一', summary: 's', source: 'a' }] },
+          { name: 'AI', items: [{ title: 'AI 发展二', summary: 's', source: 'b' }, { title: 'AI 发展三', summary: 's', source: 'c' }] },
         ],
       })
       const out = await broadcast(newsBroadcast, mk())
@@ -254,7 +254,11 @@ describe('news_broadcast 工具', () => {
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: { categories: ['科技'], topics: ['AI'] } }] }),
       }), makeRes())
-      const out3 = await broadcast(newsBroadcast, { ...mk(), force: true })
+      const out3 = await broadcast(newsBroadcast, { ...mk(), force: true, title: 'x',
+        categories: [
+          { name: '科技', items: [{ title: '量子计算新突破', summary: 's', source: 'a' }] },
+          { name: 'AI', items: [{ title: '开源模型发布', summary: 's', source: 'b' }, { title: '具身智能进展', summary: 's', source: 'c' }] },
+        ] })
       expect(out3.ok).toBe(true)
       expect(out3.items).toBe(3)
       expect(out3.notice).not.toContain('已按班次范围过滤')
@@ -293,19 +297,18 @@ describe('news_broadcast 工具', () => {
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 12, scope: { categories: ['科技'], topics: [] } }] }),
       }), makeRes())
-      const out = await broadcast(newsBroadcast, {
-        title: 'x', shiftId: 's1', date: '2026-05-30',
-        categories: [
-          { name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's', source: 'a' })) },
-        ],
+      // 用互不相似的中文标题（避免数字编号 t1/t11 被去重误伤——那是去重的正确行为）。
+      const mk12 = () => ({ title: 'x', shiftId: 's1', date: '2026-05-30',
+        categories: [{ name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: `科技新闻第${i + 1}号`, summary: 's', source: 'a' })) }],
       })
+      const out = await broadcast(newsBroadcast, mk12())
       expect(out.ok).toBe(true)
       expect(out.items).toBe(12)
       // 对话直接播报（无班次）仍受默认 8 条/类限制
       const manual = await broadcast(newsBroadcast, {
         title: 'x', date: '2026-05-30',
         categories: [
-          { name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's', source: 'a' })) },
+          { name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: `芯片工艺演进${i}`, summary: 's', source: 'a' })) },
         ],
       })
       expect(manual.items).toBe(8)
@@ -343,6 +346,87 @@ describe('news_broadcast 工具', () => {
       const r = await broadcast(newsBroadcast, { ...NEWS_BODY, title: '第二期' })
       expect(r.ok).toBe(true)
       void res0
+    } finally { cleanup() }
+  })
+})
+
+describe('news_broadcast 工具层去重（RFC §7）', () => {
+  it('与当日已有期次重复的条目被剔除（跨班次去重兜底）', async () => {
+    const { newsBroadcast, cleanup } = boot()
+    try {
+      // 第一期提交「多地强降雨」。
+      const r1 = await broadcast(newsBroadcast, {
+        ...NEWS_BODY,
+        categories: [{ name: '热点', items: [
+          { title: '多地迎来强降雨', summary: '暴雨预警继续，多地启动应急响应。', source: '央视新闻' },
+        ] }],
+      })
+      expect(r1.ok).toBe(true)
+      // 第二期（不同 shift，冷却窗不挡）提交措辞不同的同事件 → 被工具层剔除。
+      const r2 = await broadcast(newsBroadcast, {
+        ...NEWS_BODY, shiftId: 's2',
+        categories: [{ name: '热点', items: [
+          { title: '多地持续强降雨', summary: '降雨持续，中央气象台继续发布预警。', source: '央视新闻' },
+          { title: '某新片上映', summary: '暑期档新片今日上映。', source: '新浪娱乐' },
+        ] }],
+      })
+      expect(r2.ok).toBe(true)
+      expect(r2.notice).toContain('工具层去重剔除 1 条')
+      expect(r2.items).toBe(1) // 只剩新片上映
+    } finally { cleanup() }
+  })
+
+  it('official 源升级替换：当日旧期次同事件条目被移除（更权威优先）', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      // 先配置信源池（含 official 级新华社），使 sourceRank 生效。
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/rss',
+        body: JSON.stringify({ enabled: true, feeds: [
+          { id: 'xinhuashe', title: '新华社', tier: 'official', category: '国内', url: 'https://rss.news.cn/x.xml' },
+        ] }),
+      }), makeRes())
+      // 第一期：央视（major 2）报同事件。
+      const r1 = await broadcast(newsBroadcast, {
+        ...NEWS_BODY,
+        categories: [{ name: '热点', items: [
+          { title: '多地迎来强降雨', summary: '暴雨预警继续。', source: '央视新闻' },
+        ] }],
+      })
+      expect(r1.ok).toBe(true)
+      // 第二期：新华社（official 4）报同事件 → 升级替换：本期保留，旧期次移除旧条目。
+      const r2 = await broadcast(newsBroadcast, {
+        ...NEWS_BODY, shiftId: 's2',
+        categories: [{ name: '热点', items: [
+          { title: '多地持续强降雨', summary: '官方通报最新灾情。', source: '新华社' },
+        ] }],
+      })
+      expect(r2.ok).toBe(true)
+      expect(r2.notice).toContain('official 源升级替换')
+      expect(r2.items).toBe(1)
+      // 旧期次（r1）里的同事件条目已被移除。
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), res)
+      const editions = JSON.parse(res.body).editions
+      const first = editions.find((e) => e.id === r1.editionId)
+      expect(first.totalItems).toBe(0)
+    } finally { cleanup() }
+  })
+
+  it('批内重复（同一提交措辞不同）被剔除', async () => {
+    const { newsBroadcast, cleanup } = boot()
+    try {
+      const r = await broadcast(newsBroadcast, {
+        ...NEWS_BODY,
+        categories: [{ name: '热点', items: [
+          { title: '政策发布会召开', summary: '国新办介绍要点。', source: '新华社' },
+          { title: '政策发布会举行', summary: '发布会今日举行。', source: '央视新闻' }, // 与上条重复
+          { title: '多地强降雨', summary: '暴雨预警。', source: '央视新闻' },
+        ] }],
+      })
+      expect(r.ok).toBe(true)
+      expect(r.notice).toContain('工具层去重剔除 1 条')
+      expect(r.items).toBe(2)
     } finally { cleanup() }
   })
 })
@@ -593,6 +677,113 @@ describe('news 路由', () => {
       const times = editions.map((e) => e.createdAt)
       expect(times).toEqual([...times].sort((a, b) => b - a))
       expect(editions.some((e) => e.title === '别班次')).toBe(true)
+    } finally { cleanup() }
+  })
+})
+
+describe('RSS 信源池路由', () => {
+  it('GET /news/rss 返回默认池 + 池状态（开箱即用）', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/rss' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.rss.enabled).toBe(true)
+      expect(data.rss.feeds.length).toBe(10) // 内置默认池（实测今日新鲜，见 news-core DEFAULT_RSS_FEEDS）
+      expect(data.rss.pollMinutes).toBe(30)
+      expect(data.status.poolSize).toBe(0)
+    } finally { cleanup() }
+  })
+
+  it('POST /news/rss 保存配置：增删 feed / 节奏 clamp / 重建定时器', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/rss',
+        body: JSON.stringify({ enabled: true, pollMinutes: 5, feeds: [
+          { url: 'https://a.com/rss', title: '源A', tier: 'official', category: '国内' },
+          { url: 'bad-url', title: '坏源' }, // 非法 → 丢弃
+        ] }),
+      }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.rss.pollMinutes).toBe(15) // clamp 到下限
+      expect(data.rss.feeds).toHaveLength(1)
+      expect(data.rss.feeds[0].title).toBe('源A')
+      // 持久化：重新 GET 应读回
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/rss' }), res2)
+      expect(JSON.parse(res2.body).rss.feeds[0].tier).toBe('official')
+    } finally { cleanup() }
+  })
+
+  it('POST /news/rss/pull 手动拉取一轮（stub fetch 返回 RSS → 条目入库）', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      // stub 全局 fetch：返回一份 RSS 2.0，验证解析 + 增量入库 + 池状态。
+      // pubDate 用「当前时间」而非固定日期——prunePool 会按 publishedAt 48h 淘汰旧闻，
+      // 旧日期条目入池即被裁掉（池定位当日新闻）。
+      const nowDate = new Date()
+      const rfcDate = (h, m) => {
+        const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        const p = (n) => String(n).padStart(2, '0')
+        return `${DAYS[nowDate.getDay()]}, ${p(nowDate.getDate())} ${MONTHS[nowDate.getMonth()]} ${nowDate.getFullYear()} ${p(h)}:${p(m)}:00 +0800`
+      }
+      const FAKE_RSS = `<?xml version="1.0"?><rss version="2.0"><channel>
+        <item><title>测试新闻一</title><link>https://example.com/1</link>
+          <pubDate>${rfcDate(8, 2)}</pubDate><description>测试摘要一。</description></item>
+        <item><title>测试新闻二</title><link>https://example.com/2</link>
+          <pubDate>${rfcDate(7, 45)}</pubDate><description>测试摘要二。</description></item>
+      </channel></rss>`
+      const fetchStub = vi.fn(async () => ({
+        ok: true, status: 200,
+        text: async () => FAKE_RSS,
+      }))
+      vi.stubGlobal('fetch', fetchStub)
+      // 先保存一个单源池配置（避免 10 个默认源都打 stub）。
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/rss',
+        body: JSON.stringify({ enabled: true, feeds: [
+          { id: 'f1', url: 'https://example.com/rss', title: '测试源', tier: 'major', category: '国内' },
+        ] }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/pull' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.added).toBe(2)
+      expect(data.total).toBe(2)
+      // 池状态可见
+      expect(data.status.poolSize).toBe(2)
+      // 再次拉取：增量去重，无新增
+      const res2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/pull' }), res2)
+      expect(JSON.parse(res2.body).added).toBe(0)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('POST /news/rss/resume 恢复被停用的源', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      // 先保存一个带 suspendedUntil 的源
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/rss',
+        body: JSON.stringify({ enabled: true, feeds: [
+          { id: 'f1', url: 'https://a.com/rss', title: '源A', tier: 'major', category: '科技', suspendedUntil: Date.now() + 3600000 },
+        ] }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/resume', body: JSON.stringify({ feedId: 'f1' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.rss.feeds[0].suspendedUntil).toBeUndefined()
+      // 未知 feed → 404
+      const res2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/rss/resume', body: JSON.stringify({ feedId: 'nope' }) }), res2)
+      expect(res2.status).toBe(404)
     } finally { cleanup() }
   })
 })

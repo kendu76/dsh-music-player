@@ -454,7 +454,13 @@
   单测：渲染/分块/校验/路由冒烟（mock synthesize）。
 - **M2 Web 播放**：新闻页签 + 播放条新闻模式（字幕/进度/类别跳转/续播）。渲染冒烟测试。
 - **M3 提示词与定时联调**：系统提示词、schedule 流程文档化、README/FAQ 更新。
-- **M4（可选演进）**：方案 B host 全自动、热榜聚合 API 兜底源（§8.5）、定时设置 UI、多期归档管理。
+- **M4（可选演进）**：方案 B host 全自动、热榜聚合 API 兜底源（§8.5）、多期归档管理。
+- **M5（已实现，RFC docs/news-rss-pool-rfc.md）**：RSS 信源池（P0）——Host 侧按节奏拉取默认 12 源
+  （official 9 + major 3，2026-09 实测全部可用，开箱即用，用户可增删至 ≤30），池条目带可靠 pubDate 作为第一信源，
+  收集时按班次范围预筛注入指令，`web_search` 降为补盲；信源分级（official > major > secondary > kol）
+  驱动去重取权威与 official 升级替换。工具层确定性去重（P1）——`news_broadcast` 提交时对标题
+  归一化 + bigram/unigram Jaccard 比对，与本期次内及当日已有期次去重，notice 透明报告。
+  两阶段分析配额化（P1）——提示词固化「先摘要快筛 → 再配额内深抓（每类 ≤2、全期 ≤6）」。
 
 ## 11. 决策记录
 
