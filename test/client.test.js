@@ -8770,6 +8770,60 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
+  it('定时编辑器：仅工作日班次显示「工作日」徽标，弹窗可勾选并落盘 workdaysOnly', async () => {
+    newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    newsScheduleServer.shifts[0].workdaysOnly = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 仅工作日班次卡片显示「工作日」徽标
+      const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
+      expect(cards.length).toBe(1)
+      expect(cards[0].textContent).toContain('工作日')
+      // 添加班次弹窗：仅工作日勾选框存在且默认不勾选（排在「收集后立即播放」之后）
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      expect(overlay).toBeTruthy()
+      expect(overlay.textContent).toContain('仅工作日执行（节假日除外）')
+      const wdBoxes = [...overlay.querySelectorAll('input[type="checkbox"]')]
+      expect(wdBoxes.length).toBeGreaterThanOrEqual(2)
+      const wdBox = wdBoxes[wdBoxes.length - 1]
+      expect(wdBox.checked).toBe(false)
+      // 选一个类别 + 勾选仅工作日 → 添加 → 自动保存后服务端收到 workdaysOnly: true
+      const chipBtns = [...overlay.querySelectorAll('.dsh-music-subtab')]
+      act(() => { chipBtns[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      act(() => { wdBox.click() }) // click 触发 React onChange（toggle checked）
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const okBtn = [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加')
+      act(() => { okBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect([...container.querySelectorAll('.dsh-music-news-shift-card')].length).toBe(2)
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
+      const newShift = newsScheduleServer.shifts.find((s) => s.id !== 's1')
+      expect(newShift).toBeTruthy()
+      expect(newShift.workdaysOnly).toBe(true)
+      // 新班次卡片也显示「工作日」徽标
+      const cardsAfter = [...container.querySelectorAll('.dsh-music-news-shift-card')]
+      const added = cardsAfter.find((c) => c.textContent.includes(newShift.time))
+      expect(added.textContent).toContain('工作日')
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
+  })
+
   it('定时编辑器：收集进行中时 ▶ 置灰显示 ⟳、状态行提示收集中', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()

@@ -505,7 +505,7 @@ describe('news_schedule 工具', () => {
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({
           enabled: true, defaultScope: { categories: [], topics: [] },
-          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, workdaysOnly: true, scope: null }],
         }),
       }), makeRes())
       const out = await newsSchedule.execute({ action: 'get' })
@@ -515,6 +515,10 @@ describe('news_schedule 工具', () => {
       expect(Array.isArray(data.shifts)).toBe(true)
       expect(data.shifts.length).toBe(1)
       expect(data.shifts[0].itemCount).toBe(8) // 未配置时默认 8
+      expect(data.shifts[0].workdaysOnly).toBe(true) // 仅工作日字段随偏好返回
+      expect(data.calendar).toBeTruthy() // 工作日历状态（在线拉取缓存 + 内置表）
+      expect(data.calendar.years).toBeDefined()
+      expect(data.calendar.source).toBe('timor.tech')
       expect(data.notice).toContain('Host 端自维护')
       expect('inSync' in data).toBe(false) // 不再有同步语义
     } finally { cleanup() }
@@ -720,6 +724,33 @@ describe('news 路由', () => {
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: body2 }), r3)
       expect(JSON.parse(r3.body).schedulePrefs.prefVersion).toBe(2)
       expect(JSON.parse(r3.body).schedulePrefs.shifts[0].itemCount).toBe(8) // 未传 itemCount → 默认 8
+    } finally { cleanup() }
+  })
+
+  it('schedule 偏好 POST 落盘「仅工作日执行」（workdaysOnly）', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const body = JSON.stringify({
+        enabled: true,
+        shifts: [
+          { id: 's1', time: '08:00', autoplay: true, workdaysOnly: true, scope: null },
+          { id: 's2', time: '09:00', autoplay: true, scope: null },
+        ],
+      })
+      const r1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r1)
+      const p1 = JSON.parse(r1.body).schedulePrefs
+      expect(p1.shifts[0].workdaysOnly).toBe(true)
+      expect(p1.shifts[1].workdaysOnly).toBe(false) // 未传 → false
+      // 内容实质变化（workdaysOnly 翻转）应递增版本号
+      const body2 = JSON.stringify({
+        enabled: true,
+        shifts: [{ id: 's1', time: '08:00', autoplay: true, workdaysOnly: false, scope: null }],
+      })
+      const r2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: body2 }), r2)
+      expect(JSON.parse(r2.body).schedulePrefs.prefVersion).toBe(2)
+      expect(JSON.parse(r2.body).schedulePrefs.shifts[0].workdaysOnly).toBe(false)
     } finally { cleanup() }
   })
 

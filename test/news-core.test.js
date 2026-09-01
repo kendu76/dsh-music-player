@@ -3,9 +3,10 @@ import {
   PRESET_CATEGORIES, LIMITS, cnOrdinal, formatDateCn, sanitizeEditionInput,
   renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown, partitionStaleNews,
   summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
-  sanitizeModelSelection, runStateAlive,
+  sanitizeModelSelection, runStateAlive, shiftFiresAt,
   normalizeShiftItemCount, evenItemQuota, capCategoriesToQuota,
 } from '../lib/news-core.js'
+import { buildCalendar } from '../lib/calendar.js'
 
 const VALID_BODY = {
   title: '早间新闻播报',
@@ -377,6 +378,17 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.shifts.map((s) => s.itemCount)).toEqual([12, 1, 20, 8])
   })
+  it('班次「仅工作日执行」：显式 true 保留、缺失/非 true 一律 false', () => {
+    const p = sanitizeSchedulePrefs({
+      shifts: [
+        { id: 'a', time: '08:00', workdaysOnly: true },
+        { id: 'b', time: '09:00', workdaysOnly: false },
+        { id: 'c', time: '10:00' }, // 旧数据无该字段 → false
+        { id: 'd', time: '11:00', workdaysOnly: 1 }, // 非严格 true → false
+      ],
+    })
+    expect(p.shifts.map((s) => s.workdaysOnly)).toEqual([true, false, false, false])
+  })
   it('空范围兜底为全预设类别；纯主题范围原样保留', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
@@ -440,6 +452,54 @@ describe('runStateAlive（TTL 懒过期）', () => {
     expect(runStateAlive(run, 1000 + LIMITS.runStateTtlMs - 1)).toBe(true)
     expect(runStateAlive(run, 1000 + LIMITS.runStateTtlMs)).toBe(false)
     expect(runStateAlive(null, 1000)).toBe(false)
+  })
+})
+
+describe('shiftFiresAt（班次到点判断）', () => {
+  // 2026-05-30 = 周六，2026-05-31 = 周日，2026-06-01 = 周一，2026-06-05 = 周五
+  const SAT = new Date(2026, 4, 30) // 周六 getDay()=6
+  const SUN = new Date(2026, 4, 31) // 周日 getDay()=0
+  const MON = new Date(2026, 5, 1) // 周一 getDay()=1
+  const FRI = new Date(2026, 5, 5) // 周五 getDay()=5
+  const CAL = buildCalendar() // 2025/2026 内置工作日历（含法定节假日与调休补班）
+  it('普通班次（非仅工作日）每天到点都触发', () => {
+    const shift = { time: '08:00', workdaysOnly: false }
+    expect(shiftFiresAt(shift, SAT)).toBe(true)
+    expect(shiftFiresAt(shift, SUN)).toBe(true)
+    expect(shiftFiresAt(shift, MON)).toBe(true)
+    expect(shiftFiresAt(shift, FRI)).toBe(true)
+  })
+  it('仅工作日班次（无日历）：周六/周日跳过，周一至周五触发', () => {
+    const shift = { time: '08:00', workdaysOnly: true }
+    expect(shiftFiresAt(shift, SAT)).toBe(false)
+    expect(shiftFiresAt(shift, SUN)).toBe(false)
+    expect(shiftFiresAt(shift, MON)).toBe(true)
+    expect(shiftFiresAt(shift, FRI)).toBe(true)
+  })
+  it('仅工作日班次（带日历）：法定节假日放假不触发，即使落在工作日', () => {
+    const shift = { time: '08:00', workdaysOnly: true }
+    expect(shiftFiresAt(shift, new Date(2026, 9, 1), CAL)).toBe(false) // 周四·国庆
+    expect(shiftFiresAt(shift, new Date(2026, 9, 2), CAL)).toBe(false) // 周五·国庆
+    expect(shiftFiresAt(shift, new Date(2026, 8, 25), CAL)).toBe(false) // 周五·中秋
+  })
+  it('仅工作日班次（带日历）：周末调休补班视为工作日照常触发', () => {
+    const shift = { time: '08:00', workdaysOnly: true }
+    expect(shiftFiresAt(shift, new Date(2026, 9, 10), CAL)).toBe(true) // 周六·国庆补班
+    expect(shiftFiresAt(shift, new Date(2026, 8, 20), CAL)).toBe(true) // 周日·国庆补班
+  })
+  it('仅工作日班次（带日历）：普通工作日触发、普通周末跳过', () => {
+    const shift = { time: '08:00', workdaysOnly: true }
+    expect(shiftFiresAt(shift, new Date(2026, 9, 12), CAL)).toBe(true) // 周一
+    expect(shiftFiresAt(shift, new Date(2026, 9, 11), CAL)).toBe(false) // 周日
+  })
+  it('旧数据（无 workdaysOnly 字段）按普通班次每天触发', () => {
+    const shift = { time: '08:00' }
+    expect(shiftFiresAt(shift, SAT)).toBe(true)
+  })
+  it('无效班次返回 false（不触发）', () => {
+    expect(shiftFiresAt(null, MON)).toBe(false)
+    expect(shiftFiresAt(undefined, MON)).toBe(false)
+    expect(shiftFiresAt('x', MON)).toBe(false)
   })
 })
 
