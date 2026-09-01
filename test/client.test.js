@@ -149,6 +149,7 @@ const newsScheduleDefault = {
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+let newsFailuresServer = [] // 最近收集失败（非空时新闻列表页定时状态行下方显示失败提示行）
 let newsRunState = null // 收集运行态（null=空闲；非 null 时面板显示「收集中」并禁用 ▶）
 async function fetchStub(url, opts) {
   const u = String(url)
@@ -160,13 +161,18 @@ async function fetchStub(url, opts) {
   if (u === '/dsh-music/news/runstate') {
     return jsonRes({ ok: true, run: newsRunState })
   }
+  if (u === '/dsh-music/news/failures/clear' && o && o.method === 'POST') {
+    const cleared = newsFailuresServer.length
+    newsFailuresServer = []
+    return jsonRes({ ok: true, cleared })
+  }
   if (u === '/dsh-music/news/schedule') {
     if (o && o.method === 'POST') {
       const body = JSON.parse(o.body || '{}')
       newsScheduleServer = body
       return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, changed: true })
     }
-    return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, failures: [] })
+    return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, failures: newsFailuresServer })
   }
   if (u.startsWith('/dsh-music/news/') && u.endsWith('/meta')) {
     return jsonRes(newsMetaFixture)
@@ -372,6 +378,7 @@ beforeEach(async () => {
   lyricOnlineFixture = null
   manifest = baseManifest()
   newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+  newsFailuresServer = []
   newsRunState = null
   await bootClient()
 })
@@ -8637,25 +8644,32 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 班次卡片：时间 + 范围摘要 + 立即播放开关 + 操作按钮
+      // 班次卡片：时间 + 范围摘要 + 新闻条数 + 立即播放开关 + 操作按钮
       const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
       expect(cards.length).toBe(1)
       expect(cards[0].textContent).toContain('08:00')
       // 旧 null scope 兜底展示全部预设类别，不再有「默认 · 」前缀（defaultScope 已退役）
       expect(cards[0].textContent).toContain('热点/国内/国际/科技/财经/体育/娱乐')
       expect(cards[0].textContent.includes('默认 · ')).toBe(false)
+      // 卡片展示新闻条数：存量班次无 itemCount → 默认 8 条
+      expect(cards[0].textContent).toContain('· 8 条')
       expect(cards[0].textContent).toContain('立即播放')
       // 添加班次按钮位于班次标题右侧，点击弹出设置弹窗（不是平铺在编辑器里）
       const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
       expect(addBtn).toBeTruthy()
       act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 弹窗：标题 + 时刻输入 + 类别 chips + 确定（其它测试可能残留其它 overlay，按内容定位）
+      // 弹窗：标题 + 时刻输入 + 新闻条数 + 类别 chips + 确定（其它测试可能残留其它 overlay，按内容定位）
       const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
       expect(overlay).toBeTruthy()
       expect(overlay.textContent).toContain('添加班次')
       const timeInput = overlay.querySelector('input[type="time"]')
       expect(timeInput).toBeTruthy()
+      // 新闻条数输入：默认 8（1-20 范围）
+      const itemInput = overlay.querySelector('input[type="number"]')
+      expect(itemInput).toBeTruthy()
+      expect(Number(itemInput.value)).toBe(8)
+      expect(overlay.textContent).toContain('条（1-20，默认 8')
       const chipBtns = [...overlay.querySelectorAll('.dsh-music-subtab')]
       expect(chipBtns.map((b) => b.textContent).indexOf('热点')).toBeGreaterThanOrEqual(0)
       // 范围必填：新班次默认一个类别都不选 → 「添加」禁用（无提示文案，仅按钮置灰）；选一个类别 → 恢复可用
@@ -8683,11 +8697,12 @@ describe('news pane（新闻播报页签）', () => {
       // 已移除全局「默认类别」区块与手动「保存」按钮（编辑即自动保存）
       expect(container.textContent.includes('默认类别')).toBe(false)
       expect([...container.querySelectorAll('button')].some((b) => b.textContent === '保存')).toBe(false)
-      // 自动保存：防抖窗口（500ms）过后，POST 已把新增班次落盘
+      // 自动保存：防抖窗口（500ms）过后，POST 已把新增班次落盘（含默认新闻条数 8）
       await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
       expect(newsScheduleServer.shifts.length).toBe(2)
       expect(newsScheduleServer.shifts[0].time).toBe('08:00')
       expect(newsScheduleServer.shifts[1].time).toBe('21:30')
+      expect(newsScheduleServer.shifts[1].itemCount).toBe(8)
     } finally {
       newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
     }
@@ -9040,13 +9055,14 @@ describe('news pane（新闻播报页签）', () => {
       expect(bookHint).toBeTruthy()
       expect(bookHint.textContent).toContain('1. 支持 .txt / .epub 文件')
       expect(bookHint.textContent).toContain('2. AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
-      // 新闻播报：底部为单条 xiaomi 提示（无编号、无格式说明）
+      // 新闻播报：底部为编号列表（xiaomi 语音 + DeepSeek 搜索提示，分行显示）
       const newsTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
       act(() => { newsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const newsHint = container.querySelector('.dsh-music-tts-hint')
       expect(newsHint).toBeTruthy()
-      expect(newsHint.textContent).toContain('AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      expect(newsHint.textContent).toContain('1. AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      expect(newsHint.textContent).toContain('2. 新闻收集需要 DeepSeek 搜索服务（web_search 使用 DeepSeek 官方 API），请在 DSH 设置中配置好再使用。')
       expect(newsHint.textContent.includes('支持 .txt')).toBe(false)
       // 本地音乐：底部为单条格式说明（顶部设置块不再显示提示）
       const musicTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
@@ -9055,6 +9071,36 @@ describe('news pane（新闻播报页签）', () => {
       const musicHint = container.querySelector('.dsh-music-tts-hint')
       expect(musicHint).toBeTruthy()
       expect(musicHint.textContent).toContain('支持 mp3 / m4a / flac / wav / ogg / opus / aac / webm 等格式，自动递归扫描子目录。')
+    } finally { }
+  })
+
+  it('失败提示行：展示最近失败并带「✕」清除按钮，点击后清空并消失', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      // 预置一条收集失败（如搜索余额不足），新闻列表页定时状态行下方显示失败行
+      newsFailuresServer = [{ ts: Date.now() - 60e3, shiftId: 's1', kind: 'error', reason: 'HTTP 402 Insufficient Balance' }]
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 失败行渲染：⚠ + 时间 + 收集失败 + 原因，带 ✕ 按钮
+      const failureEl = container.querySelector('.dsh-music-news-failure')
+      expect(failureEl).toBeTruthy()
+      expect(failureEl.textContent).toContain('收集失败')
+      expect(failureEl.textContent).toContain('HTTP 402 Insufficient Balance')
+      const closeBtn = failureEl.querySelector('.dsh-music-news-failure-close')
+      expect(closeBtn).toBeTruthy()
+      expect(closeBtn.textContent).toBe('✕')
+      // 点击 ✕ → 调 /failures/clear → 失败行消失
+      act(() => { closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(newsFailuresServer.length).toBe(0) // mock 端已清空
+      expect(container.querySelector('.dsh-music-news-failure')).toBeNull() // 展示同步消失
     } finally { }
   })
 })

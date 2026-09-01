@@ -151,11 +151,11 @@
 │  班次（每天按以下时刻触发；点行展开收集范围）      │
 │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐   │
 │    08:00  [✓]收集后立即播放         [▶] [🗑]   │
-│      └ 范围: [热点][国内][国际][科技][财经][体育][娱乐] │   ← 显式全选七类
+│      └ 范围: [热点][国内][国际][科技][财经][体育][娱乐] · 8 条 │   ← 显式全选七类
 │    12:30  [ ]收集后立即播放         [▶] [🗑]   │   ← 不勾选 = 静默收集
-│      └ 范围: 主题:AI                           │   ← 纯主题范围：只收集 AI
+│      └ 范围: 主题:AI · 5 条                    │   ← 纯主题范围：只收集 AI
 │    18:00  [✓]收集后立即播放         [▶] [🗑]   │
-│      └ 范围: [国内][国际] + 主题:美股              │
+│      └ 范围: [国内][国际] + 主题:美股 · 8 条       │
 │  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘   │
 │  [＋ 添加班次]   （新班次默认不选，至少选一项方可保存；上限 6 个）  │
 │                                              │
@@ -185,9 +185,14 @@
   （`busy`，不新建执行会话），定时撞车跳过本轮并留日志；`runState` 带 10 分钟 TTL，
   agent 漏报失败时自动复位不会卡死。同一班次冷却窗（10 分钟）内重复提交仍会被
   `news_broadcast` 工具层跳过，`force` 可强制重收（见功能设计 §5.1）。
-- **添加班次**：弹窗新增，默认 `08:00 · 勾选立即播放 · 不选任何类别`；上限 6 个
+- **添加班次**：弹窗新增，默认 `08:00 · 新闻条数 8 · 勾选立即播放 · 不选任何类别`；上限 6 个
   （成本与可读性平衡，超出置灰）。班次列表**按触发时刻升序**排列（与创建先后无关，
   面板展示与持久化顺序均已归一化）。
+- **新闻条数（班次级，编辑弹窗内设置）**：单期收集条数上限，数字输入 1–20，**默认 8**。
+  **多类别尽量平均分配**：若班次选择了多个类别（预设类别 chips + 自定义主题合计），
+  总条数在各类别间均摊（如 8 条 × 3 类 → 3/3/2，余数给靠前类别）；单类别则全部归该类
+  （可超过默认每类 8 条的上限）。触发指令会把本期条数与配额写进收集指令，工具层另按
+  配额兜底收敛（见功能设计 §7.2）。
 - **收集范围（班次级，编辑弹窗内设置）**：
   - **预设类别 chips**：热点（排第一，跨领域+热度排序）/ 国内 / 国际 / 科技 / 财经 / 体育 / 娱乐 多选；
   - **自定义主题**：自由文本 tag（如 `AI`、`新能源汽车`、`美股`），每班次 ≤ 5 个。
@@ -319,11 +324,12 @@ agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板�
 | 状态 | 呈现位置 | 形式 |
 |---|---|---|
 | TTS 未配置 | 新闻页签顶部 | 提示条「未配置 xiaomi 提供方，简报可阅读不可播」（期次仍生成） |
+| 搜索服务未配置 | 新闻页签底部提示区 | 与 AI 语音提示分行显示：「新闻收集需要 DeepSeek 搜索服务（web_search 使用 DeepSeek 官方 API），请在 DSH 设置中配置好再使用。」——未配置 DeepSeek 搜索时收集无法进行 |
 | 块合成中 | 播放条名称后 + 条目行尾 | `合成中… Ns` 递增计数 |
 | 块合成失败 | 播放条 | 错误文案 + 「重试」按钮（讲书同款） |
 | 待播 | 期次列表行 | 「待播」小徽标（已收集未播放：定时错过/静默收集），开播后消失 |
 | 班次执行中 | 定时状态行 + 编辑器班次行 | `⟳ 收集中…`（▶ 按钮禁点，TTL 10 分钟自动复位）；完成后出期/报失败 |
-| 班次收集失败 | 定时状态行下方 | 「⚠ 今天 12:30 班次收集失败 · \<错误摘要\> ▶ 补收」/「⚠ 12:30 收集无结果」——原因透传工具错误码与消息（不做诊断），附通用排查指引；最近 10 条，agent 经 `news_schedule` `reportFailure` 回写 |
+| 班次收集失败 | 定时状态行下方 | 「⚠ 今天 12:30 班次收集失败 · \<错误摘要\>」——原因透传工具错误码与消息（不做诊断），附通用排查指引；最近 10 条，agent 经 `news_schedule` `reportFailure` 回写；**任何一次收集成功后自动清空**（问题恢复即消失，重启/刷新不残留）；行尾「✕」可**手动清除**（`POST /dsh-music/news/failures/clear`，无需等下一次收集） |
 | 班次数 | 定时状态行 / 编辑器 | 「N 班次 / N 个班次」；无同步语义（Host 自维护） |
 | 正在播条目 | 详情列表 + 目录弹层 | 高亮（同歌单正在播样式） |
 | 空态 | 新闻页签 | 引导文案（见 §3.1） |
@@ -346,7 +352,7 @@ agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板�
 |---|---|
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
-| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, model:{provider,model}?, shifts:[{id,time,autoplay,scope:{categories[],topics[]}}], prefVersion, syncedVersion }`，班次 `scope` 必填（至少一个类别或主题；全局 `defaultScope` 已退役，旧数据空范围由 Host 规整为全选六类），`model` 为「新闻采集模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
+| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, model:{provider,model}?, shifts:[{id,time,autoplay,itemCount,scope:{categories[],topics[]}}], prefVersion, syncedVersion }`，班次 `scope` 必填（至少一个类别或主题；全局 `defaultScope` 已退役，旧数据空范围由 Host 规整为全选六类），`itemCount` 为「新闻条数」（1-20，默认 8，多类别时各类别尽量平均分配），`model` 为「新闻采集模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
 | Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`POST /dsh-music/news/purge-stale`（每日 03:00 / 启动清理同一入口：删除今天之前的期次与失败记录并归档会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻采集模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`/`rebuildCleanupTimer()`（Host 端：每次执行新建执行会话并归入「新闻收集」工作区分组、统一入口、自维护定时器与每日清理定时器） |
 | 提示词 | news 系统提示词 section 说明收集流程与失败处理；定时为 Host 自维护，引导用户到面板配置 |
 | 工具 | `news_broadcast` 之外保留轻量 `news_schedule`（action: get / reportFailure），供执行会话查询偏好与上报收集失败；不再有 begin / markSynced / 同步语义 |

@@ -261,6 +261,57 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
+  it('班次新闻条数：多类别按平均配额收敛（8 条 × 3 类 → 3/3/2）', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 8, scope: { categories: ['热点', '国内', '国际'], topics: [] } }] }),
+      }), makeRes())
+      const out = await broadcast(newsBroadcast, {
+        title: 'x', shiftId: 's1', date: '2026-05-30',
+        categories: [
+          { name: '热点', items: Array.from({ length: 6 }, (_, i) => ({ title: 'h' + i, summary: 's', source: 'a' })) },
+          { name: '国内', items: Array.from({ length: 5 }, (_, i) => ({ title: 'd' + i, summary: 's', source: 'b' })) },
+          { name: '国际', items: Array.from({ length: 4 }, (_, i) => ({ title: 'i' + i, summary: 's', source: 'c' })) },
+        ],
+      })
+      expect(out.ok).toBe(true)
+      expect(out.items).toBe(8) // 6+5+4=15 → 收敛到 8
+      expect(out.notice).toContain('平均分配')
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), res)
+      const ed = JSON.parse(res.body).editions.find((e) => e.id === out.editionId)
+      expect(ed.categories.map((c) => c.count)).toEqual([3, 3, 2])
+    } finally { cleanup() }
+  })
+
+  it('班次新闻条数：单类别可超过默认 8 条/类（limits 覆盖）', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 12, scope: { categories: ['科技'], topics: [] } }] }),
+      }), makeRes())
+      const out = await broadcast(newsBroadcast, {
+        title: 'x', shiftId: 's1', date: '2026-05-30',
+        categories: [
+          { name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's', source: 'a' })) },
+        ],
+      })
+      expect(out.ok).toBe(true)
+      expect(out.items).toBe(12)
+      // 对话直接播报（无班次）仍受默认 8 条/类限制
+      const manual = await broadcast(newsBroadcast, {
+        title: 'x', date: '2026-05-30',
+        categories: [
+          { name: '科技', items: Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's', source: 'a' })) },
+        ],
+      })
+      expect(manual.items).toBe(8)
+    } finally { cleanup() }
+  })
+
   it('不同班次互不影响冷却窗；手动组独立', async () => {
     const { newsBroadcast, cleanup } = boot()
     try {
@@ -314,6 +365,7 @@ describe('news_schedule 工具', () => {
       expect(data.enabled).toBe(true)
       expect(Array.isArray(data.shifts)).toBe(true)
       expect(data.shifts.length).toBe(1)
+      expect(data.shifts[0].itemCount).toBe(8) // 未配置时默认 8
       expect(data.notice).toContain('Host 端自维护')
       expect('inSync' in data).toBe(false) // 不再有同步语义
     } finally { cleanup() }
@@ -332,6 +384,46 @@ describe('news_schedule 工具', () => {
       const r2 = makeRes()
       await handler(makeReq({ url: '/dsh-music/news/runstate' }), r2)
       expect(JSON.parse(r2.body).run).toBe(null)
+    } finally { cleanup() }
+  })
+
+  it('收集成功即清空失败记录（问题恢复后旧失败不再残留）', async () => {
+    const { handler, newsSchedule, newsBroadcast, cleanup } = boot()
+    try {
+      // 先报一条失败（如搜索余额不足），面板会展示
+      await newsSchedule.execute({ action: 'reportFailure', shiftId: 's9', kind: 'error', reason: 'HTTP 402 Insufficient Balance' })
+      const before = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), before)
+      expect(JSON.parse(before.body).failures.length).toBe(1)
+      // 之后一次成功收集（如充值后重试成功）→ 失败记录被清空
+      const ok = await broadcast(newsBroadcast, { ...NEWS_BODY, title: '恢复后的简报' })
+      expect(ok.ok).toBe(true)
+      const after = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), after)
+      expect(JSON.parse(after.body).failures.length).toBe(0)
+    } finally { cleanup() }
+  })
+
+  it('POST /news/failures/clear 手动清除失败记录（面板失败行「✕」）', async () => {
+    const { handler, newsSchedule, cleanup } = boot()
+    try {
+      await newsSchedule.execute({ action: 'reportFailure', shiftId: 's9', kind: 'error', reason: 'HTTP 402 Insufficient Balance' })
+      const before = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), before)
+      expect(JSON.parse(before.body).failures.length).toBe(1)
+      // 手动清除：清空失败记录并返回 cleared 数
+      const clear = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/failures/clear', body: '{}' }), clear)
+      const c = JSON.parse(clear.body)
+      expect(c.ok).toBe(true)
+      expect(c.cleared).toBe(1)
+      const after = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), after)
+      expect(JSON.parse(after.body).failures.length).toBe(0)
+      // 再清一次：无失败可清，cleared=0 且 ok
+      const clear2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/failures/clear', body: '{}' }), clear2)
+      expect(JSON.parse(clear2.body)).toMatchObject({ ok: true, cleared: 0 })
     } finally { cleanup() }
   })
 })
@@ -459,13 +551,14 @@ describe('news 路由', () => {
       const body = JSON.stringify({
         enabled: true,
         defaultScope: { categories: ['热点', '国内'], topics: ['AI'] },
-        shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: { categories: ['热点'], topics: [] } }],
+        shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 12, scope: { categories: ['热点'], topics: [] } }],
       })
       const r1 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r1)
       const p1 = JSON.parse(r1.body).schedulePrefs
       expect(p1.prefVersion).toBe(1)
       expect(p1.defaultScope).toBeUndefined() // defaultScope 已退役：入参字段被丢弃
+      expect(p1.shifts[0].itemCount).toBe(12) // 班次新闻条数落盘
       const r2 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r2)
       expect(JSON.parse(r2.body).schedulePrefs.prefVersion).toBe(1) // 未变化不递增
@@ -477,6 +570,7 @@ describe('news 路由', () => {
       const r3 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: body2 }), r3)
       expect(JSON.parse(r3.body).schedulePrefs.prefVersion).toBe(2)
+      expect(JSON.parse(r3.body).schedulePrefs.shifts[0].itemCount).toBe(8) // 未传 itemCount → 默认 8
     } finally { cleanup() }
   })
 
@@ -522,7 +616,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({
           enabled: true, defaultScope: { categories: [], topics: [] },
-          shifts: [{ id: 's9', time: '18:00', autoplay: false, scope: { categories: ['科技'], topics: ['AI'] } }],
+          shifts: [{ id: 's9', time: '18:00', autoplay: false, itemCount: 8, scope: { categories: ['科技'], topics: ['AI'] } }],
         }),
       }), makeRes())
       const res = makeRes()
@@ -545,6 +639,9 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).toContain('先不播放') // autoplay:false → 静默收集
       expect(text).toContain('科技')
       expect(text).toContain('AI')
+      // 指令携带班次新闻条数：8 条、2 个类别（科技 + 主题 AI）→ 每类约 4 条、多类别尽量平均分配
+      expect(text).toContain('本期共收集 8 条新闻')
+      expect(text).toContain('尽量平均分配')
       // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
       expect(text).toMatch(/今天是 \d{4}年\d{1,2}月\d{1,2}日 星期[日一二三四五六]，当前时间 \d{2}:\d{2}/)
     } finally { cleanup() }

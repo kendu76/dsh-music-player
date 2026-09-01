@@ -4,6 +4,7 @@ import {
   renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown, partitionStaleNews,
   summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
   sanitizeModelSelection, runStateAlive,
+  normalizeShiftItemCount, evenItemQuota, capCategoriesToQuota,
 } from '../lib/news-core.js'
 
 const VALID_BODY = {
@@ -78,6 +79,76 @@ describe('sanitizeEditionInput', () => {
     })
     expect(r.value.categories[0].items[0].summary).toBe(long)
     expect(r.value.categories[0].items[1].summary).toBe(noPunct)
+  })
+  it('limits 覆盖每类/全期上限（班次新闻条数配置：单类别可超过默认 8 条/类）', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's' + i }))
+    const r = sanitizeEditionInput(
+      { categories: [{ name: '热点', items: many }] },
+      { limits: { itemsPerCategory: 12, totalItems: 12 } },
+    )
+    expect(r.ok).toBe(true)
+    expect(r.value.categories[0].items.length).toBe(12)
+    // 默认 limits 仍按 8/类、20/全期
+    const d = sanitizeEditionInput({ categories: [{ name: '热点', items: many }] })
+    expect(d.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
+  })
+})
+
+describe('normalizeShiftItemCount（班次新闻条数规整）', () => {
+  it('默认 8，合法整数 1-20 原样保留', () => {
+    expect(normalizeShiftItemCount(undefined)).toBe(8)
+    expect(normalizeShiftItemCount(null)).toBe(8)
+    expect(normalizeShiftItemCount('x')).toBe(8)
+    expect(normalizeShiftItemCount(1)).toBe(1)
+    expect(normalizeShiftItemCount(8)).toBe(8)
+    expect(normalizeShiftItemCount(20)).toBe(20)
+  })
+  it('越界/小数收敛到 1-20', () => {
+    expect(normalizeShiftItemCount(0)).toBe(1)
+    expect(normalizeShiftItemCount(-3)).toBe(1)
+    expect(normalizeShiftItemCount(21)).toBe(20)
+    expect(normalizeShiftItemCount(99)).toBe(20)
+    expect(normalizeShiftItemCount(7.6)).toBe(8)
+  })
+})
+
+describe('evenItemQuota（多类别平均分配）', () => {
+  it('8 条 × 3 类 → 3/3/2；能整除则全等', () => {
+    expect(evenItemQuota(8, 3)).toEqual([3, 3, 2])
+    expect(evenItemQuota(8, 2)).toEqual([4, 4])
+    expect(evenItemQuota(10, 5)).toEqual([2, 2, 2, 2, 2])
+    expect(evenItemQuota(1, 3)).toEqual([1, 0, 0])
+  })
+})
+
+describe('capCategoriesToQuota（按班次条数收敛各类别）', () => {
+  it('多类别按配额截断，余数给靠前类别', () => {
+    const cats = [
+      { name: '热点', items: Array.from({ length: 6 }, (_, i) => ({ title: 'h' + i, summary: 's' })) },
+      { name: '国内', items: Array.from({ length: 5 }, (_, i) => ({ title: 'd' + i, summary: 's' })) },
+      { name: '国际', items: Array.from({ length: 4 }, (_, i) => ({ title: 'i' + i, summary: 's' })) },
+    ]
+    const { categories, dropped } = capCategoriesToQuota(cats, 8)
+    expect(categories.map((c) => c.items.length)).toEqual([3, 3, 2])
+    expect(dropped).toBe(6 + 5 + 4 - 8)
+    // 未超配额的类别原样保留
+    const light = [
+      { name: '热点', items: [{ title: 'h', summary: 's' }] },
+      { name: '国内', items: [{ title: 'd', summary: 's' }] },
+    ]
+    const r2 = capCategoriesToQuota(light, 8)
+    expect(r2.categories.map((c) => c.items.length)).toEqual([1, 1])
+    expect(r2.dropped).toBe(0)
+  })
+  it('配额为 0 的类别被丢弃（条数预算小于类别数时）', () => {
+    const cats = [
+      { name: 'a', items: [{ title: 'a', summary: 's' }] },
+      { name: 'b', items: [{ title: 'b', summary: 's' }] },
+      { name: 'c', items: [{ title: 'c', summary: 's' }] },
+    ]
+    const { categories } = capCategoriesToQuota(cats, 1)
+    expect(categories.length).toBe(1)
+    expect(categories[0].name).toBe('a')
   })
 })
 
@@ -294,6 +365,17 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.shifts[0].autoplay).toBe(false)
     expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope.topics.length).toBe(LIMITS.topicsPerShift)
+  })
+  it('班次新闻条数：默认 8、越界收敛到 1-20', () => {
+    const p = sanitizeSchedulePrefs({
+      shifts: [
+        { id: 'a', time: '08:00', itemCount: 12 },
+        { id: 'b', time: '09:00', itemCount: 0 },
+        { id: 'c', time: '10:00', itemCount: 99 },
+        { id: 'd', time: '11:00' },
+      ],
+    })
+    expect(p.shifts.map((s) => s.itemCount)).toEqual([12, 1, 20, 8])
   })
   it('空范围兜底为全预设类别；纯主题范围原样保留', () => {
     const p = sanitizeSchedulePrefs({
