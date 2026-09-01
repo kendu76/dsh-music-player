@@ -102,7 +102,80 @@ describe('dedupeItemsAgainst', () => {
     expect(r.kept).toHaveLength(0)
   })
   it('空输入安全', () => {
-    expect(dedupeItemsAgainst([], refs)).toEqual({ kept: [], dropped: [], upgrades: 0, upgradedRefs: [] })
-    expect(dedupeItemsAgainst(null, refs)).toEqual({ kept: [], dropped: [], upgrades: 0, upgradedRefs: [] })
+    expect(dedupeItemsAgainst([], refs)).toEqual({ kept: [], dropped: [], upgrades: 0, upgradedRefs: [], refHashes: [] })
+    expect(dedupeItemsAgainst(null, refs)).toEqual({ kept: [], dropped: [], upgrades: 0, upgradedRefs: [], refHashes: [] })
+  })
+})
+
+describe('dedupeItemsAgainst keepUnseen / maxKeep / refHashes', () => {
+  const refs = [
+    { title: '多地迎来强降雨', summary: 's', source: '央视新闻' },
+    { title: 'AI 模型密集发布', summary: 's', source: '机器之心' },
+  ]
+  it('keepUnseen：优先保留与参照组不重复的条目，凑满配额，多余整批丢弃', () => {
+    const items = [
+      { title: '多地迎来强降雨', summary: '重复', source: '央视新闻' },
+      { title: '某新片上映', summary: '新', source: '新浪娱乐' },
+      { title: '某企业完成融资', summary: '新', source: '36氪' },
+      { title: 'AI 模型密集发布', summary: '重复', source: '机器之心' },
+    ]
+    const r = dedupeItemsAgainst(items, refs, { keepUnseen: 2 })
+    expect(r.kept.map((k) => k.title)).toEqual(['某新片上映', '某企业完成融资']) // 新条目优先，2 条即满
+    expect(r.dropped.map((d) => d.title)).toEqual(['多地迎来强降雨', 'AI 模型密集发布'])
+    expect(r.upgrades).toBe(0)
+  })
+  it('keepUnseen：参照组无重复时按原序取前 N 条；不足 N 则全保留', () => {
+    const items = [
+      { title: '新闻甲', summary: 's', source: 'a' },
+      { title: '新闻乙', summary: 's', source: 'b' },
+      { title: '新闻丙', summary: 's', source: 'c' },
+    ]
+    expect(dedupeItemsAgainst(items, refs, { keepUnseen: 2 }).kept.map((k) => k.title)).toEqual(['新闻甲', '新闻乙'])
+    expect(dedupeItemsAgainst(items, refs, { keepUnseen: 5 }).kept).toHaveLength(3)
+  })
+  it('keepUnseen：与参照重复但来源更权威（升级）的条目计入新条目', () => {
+    const sourceRank = (s) => (s === '新华社' ? 3 : s === '央视新闻' ? 2 : 0)
+    const items = [
+      { title: '多地持续强降雨', summary: '官方口径', source: '新华社' }, // 升级（保留）
+      { title: '某新片上映', summary: '新', source: '新浪娱乐' },
+      { title: '某企业融资', summary: '新', source: '36氪' },
+    ]
+    const r = dedupeItemsAgainst(items, refs, { sourceRank, keepUnseen: 2 })
+    expect(r.upgrades).toBe(1)
+    expect(r.kept.map((k) => k.title)).toEqual(['多地持续强降雨', '某新片上映'])
+    expect(r.upgradedRefs.map((x) => x.title)).toEqual(['多地迎来强降雨'])
+  })
+  it('maxKeep：保留上限截断（按原序），超出进 dropped', () => {
+    const items = [
+      { title: '新闻甲', summary: 's', source: 'a' },
+      { title: '新闻乙', summary: 's', source: 'b' },
+      { title: '新闻丙', summary: 's', source: 'c' },
+    ]
+    const r = dedupeItemsAgainst(items, refs, { maxKeep: 2 })
+    expect(r.kept.map((k) => k.title)).toEqual(['新闻甲', '新闻乙'])
+    expect(r.dropped.map((d) => d.title)).toEqual(['新闻丙'])
+  })
+  it('refHashes：参照组 ∪ 本轮保留条目（供多次提交累加参照）', () => {
+    const r1 = dedupeItemsAgainst([
+      { title: '某新片上映', summary: 's', source: 'a' },
+      { title: '某企业融资', summary: 's', source: 'b' },
+    ], refs)
+    expect(r1.kept).toHaveLength(2)
+    // 参照组的 2 条 + 本轮新增 2 条 = 4 个指纹。
+    expect(r1.refHashes).toHaveLength(4)
+    expect(r1.refHashes).toContain(normalizeTitle('多地迎来强降雨'))
+    expect(r1.refHashes).toContain(normalizeTitle('某新片上映'))
+    // 第二轮以 refHashes 为参照：已报事件被排除，只保留新条目。
+    const r2 = dedupeItemsAgainst([
+      { title: '多地持续强降雨', summary: '同事件', source: '央视新闻' },
+      { title: '全新事件', summary: '新', source: 'c' },
+    ], refs.concat(r1.kept))
+    expect(r2.kept.map((k) => k.title)).toEqual(['全新事件'])
+    expect(r2.dropped.map((d) => d.title)).toEqual(['多地持续强降雨'])
+  })
+  it('includeRefs:false 时 refHashes 只含本轮新条目', () => {
+    const r = dedupeItemsAgainst([{ title: '某新片上映', summary: 's', source: 'a' }], refs, { includeRefs: false })
+    expect(r.refHashes).toHaveLength(1)
+    expect(r.refHashes).toContain(normalizeTitle('某新片上映'))
   })
 })

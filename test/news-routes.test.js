@@ -429,6 +429,71 @@ describe('news_broadcast 工具层去重（RFC §7）', () => {
       expect(r.items).toBe(2)
     } finally { cleanup() }
   })
+
+  it('当日同班次重复执行：候选冗余使去重后仍凑满班次条数（短收问题修复）', async () => {
+    const { handler, newsBroadcast, cleanup } = boot()
+    try {
+      // 配置班次：8 条 × 3 类（热点/国内/国际），多类别平均分配 → 3/3/2。
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 8, scope: { categories: ['热点', '国内', '国际'], topics: [] } }] }),
+      }), makeRes())
+      const byName = (names) => names.map((t) => ({ title: t, summary: `${t}的要点报道。`, source: '新华社' }))
+      // 第一次执行：每类 4 条 → 收敛到 3/3/2 = 8 条。
+      const r1 = await broadcast(newsBroadcast, {
+        title: 'x', shiftId: 's1', date: '2026-05-30',
+        categories: [
+          { name: '热点', items: byName(['热搜榜第一事件', '暴雨预警发布', '新片票房破亿', '景区限流通知']) },
+          { name: '国内', items: byName(['铁路调图实施', '医保新政落地', '多地中小学开学', '粮食丰收在望']) },
+          { name: '国际', items: byName(['某国选举结果公布', '全球气温创新高', '国际油价波动', '海外游客增长']) },
+        ],
+      })
+      expect(r1.ok).toBe(true)
+      expect(r1.items).toBe(8) // 12 → 收敛到 8
+      // 第二次执行（同日同班次）：agent 交 1.5~2 倍候选，其中 3/3/2 条与第一次重复、
+      // 其余为全新事件 → 去重剔除重复后仍能凑满 8 条。
+      const r2 = await broadcast(newsBroadcast, {
+        title: 'x', shiftId: 's1', date: '2026-05-30', force: true, // 同班次第二次执行（测试内同分钟，真实场景隔数小时）
+        categories: [
+          {
+            name: '热点', items: byName([
+              '热搜榜第一事件', '暴雨预警发布', '新片票房破亿', // 3 条与第一次重复
+              '消费券发放启动', '城市更新提速', '新能源车下乡', '全民健身周开幕', '夜市经济回暖', '博物馆夜场开放',
+            ]),
+          },
+          {
+            name: '国内', items: byName([
+              '铁路调图实施', '医保新政落地', '多地中小学开学', // 3 条与第一次重复
+              '户籍改革试点', '养老护理补贴', '城市公园扩建', '农产品电商增长', '社区托育扩容', '就业服务进校园',
+            ]),
+          },
+          {
+            name: '国际', items: byName([
+              '某国选举结果公布', '全球气温创新高', // 2 条与第一次重复
+              '海外市场回暖', '国际航班复航', '跨国气候会议举行', '某国贸易政策调整',
+            ]),
+          },
+        ],
+      })
+      expect(r2.ok).toBe(true)
+      expect(r2.notice).toContain('工具层去重剔除') // 重复的被剔除
+      expect(r2.items).toBe(8) // 去重 + 配额收敛后仍满 8 条（不再短收）
+      // 面板期次：第二次的 8 条全部是「新」事件（无与第一次重复的标题）。
+      const metaOf = async (id) => {
+        const res = makeRes()
+        await handler(makeReq({ url: `/dsh-music/news/${id}/meta` }), res)
+        return JSON.parse(res.body)
+      }
+      const m1 = await metaOf(r1.editionId)
+      const m2 = await metaOf(r2.editionId)
+      const titles1 = m1.categories.flatMap((c) => (c.items || []).map((i) => i.title))
+      const titles2 = m2.categories.flatMap((c) => (c.items || []).map((i) => i.title))
+      expect(titles2).toHaveLength(8)
+      // 第二次条目与第一次完全无交集（重复的都被剔除，只剩新事件）。
+      expect(titles2.filter((t) => titles1.includes(t))).toEqual([])
+    } finally { cleanup() }
+  })
+
 })
 
 describe('news_schedule 工具', () => {
@@ -833,8 +898,50 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       // 指令携带班次新闻条数：8 条、2 个类别（科技 + 主题 AI）→ 每类约 4 条、多类别尽量平均分配
       expect(text).toContain('本期共收集 8 条新闻')
       expect(text).toContain('尽量平均分配')
+      // 首次执行（当天该班次尚未执行过）：无去重风险 → 不附加候选冗余提示、不注入【已报条目】
+      expect(text).not.toContain('1.5~2 倍')
+      expect(text).not.toContain('已报条目')
       // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
       expect(text).toMatch(/今天是 \d{4}年\d{1,2}月\d{1,2}日 星期[日一二三四五六]，当前时间 \d{2}:\d{2}/)
+    } finally { cleanup() }
+  })
+
+  it('run-now 注入【已报条目】清单：当日已有期次时，指令告知已报事件并提示优先收集新条目', async () => {
+    let created = []
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created.push(opts)
+        return { agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) } }
+      },
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} } })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 's9', time: '18:00', autoplay: false, itemCount: 8, scope: { categories: ['科技'], topics: [] } }] }),
+      }), makeRes())
+      // 先提交一期（当日，date 用今天真实日期——【已报条目】按当天日期过滤），产生「已报」条目。
+      const today = new Date().toISOString().slice(0, 10)
+      const b1 = await broadcast(newsBroadcast, {
+        title: 'x', shiftId: 's9', date: today,
+        categories: [{ name: '科技', items: [
+          { title: 'AI 大模型发布', summary: '某公司发布新模型。', source: '机器之心' },
+        ] }],
+      })
+      expect(b1.ok).toBe(true)
+      // 再次 run-now：指令应注入【已报条目】清单 + 候选冗余提示（当天本班次已执行过）。
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's9' }) }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      expect(agents.injected.length).toBe(1)
+      const text = agents.injected[0].msg.content[0].text
+      expect(text).toContain('已报条目')
+      expect(text).toContain('AI 大模型发布')
+      expect(text).toContain('优先收集未在清单中的新条目')
+      // 当天该班次已执行过 → 附带「1.5~2 倍提交候选」去重缓冲提示（按需冗余，不浪费首次执行）
+      expect(text).toContain('1.5~2 倍提交候选')
     } finally { cleanup() }
   })
 
