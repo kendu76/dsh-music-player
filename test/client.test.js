@@ -9488,7 +9488,7 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
-  it('AI讲书底部恢复「支持 .txt / .epub 文件」编号提示；新闻播报底部为单条 xiaomi 提示', async () => {
+  it('各 tab 底部提示（本地音乐/AI讲书/新闻播报/关于）统一使用 tts-hint 页脚，样式与文本风格一致', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -9504,15 +9504,15 @@ describe('news pane（新闻播报页签）', () => {
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const bookHint = container.querySelector('.dsh-music-tts-hint')
       expect(bookHint).toBeTruthy()
-      expect(bookHint.textContent).toContain('1. 支持 .txt / .epub 文件')
-      expect(bookHint.textContent).toContain('2. AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      expect(bookHint.textContent).toContain('1. 支持 .txt / .epub 等格式。')
+      expect(bookHint.textContent).toContain('2. AI 语音目前仅支持 xiaomi 提供方（限时免费），请在 DSH 设置中配置好再使用。')
       // 新闻播报：底部为编号列表（xiaomi 语音 + DeepSeek 搜索提示，分行显示）
       const newsTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
       act(() => { newsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const newsHint = container.querySelector('.dsh-music-tts-hint')
       expect(newsHint).toBeTruthy()
-      expect(newsHint.textContent).toContain('1. AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      expect(newsHint.textContent).toContain('1. AI 语音目前仅支持 xiaomi 提供方（限时免费），请在 DSH 设置中配置好再使用。')
       expect(newsHint.textContent).toContain('2. 新闻收集需要 DeepSeek 搜索服务（web_search 使用 DeepSeek 官方 API），请在 DSH 设置中配置好再使用。')
       expect(newsHint.textContent.includes('支持 .txt')).toBe(false)
       // 本地音乐：底部为单条格式说明（顶部设置块不再显示提示）
@@ -9522,6 +9522,14 @@ describe('news pane（新闻播报页签）', () => {
       const musicHint = container.querySelector('.dsh-music-tts-hint')
       expect(musicHint).toBeTruthy()
       expect(musicHint.textContent).toContain('支持 mp3 / m4a / flac / wav / ogg / opus / aac / webm 等格式，自动递归扫描子目录。')
+      // 关于页：免责声明也在底部统一 tts-hint 页脚（与其它 tab 同款式）
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const aboutHint = container.querySelector('.dsh-music-tts-hint')
+      expect(aboutHint).toBeTruthy()
+      expect(aboutHint.textContent).toContain('在线音乐功能通过非官方接口访问，内容版权归版权方及平台所有，仅供个人学习、技术研究与日常试听，严禁商业用途与二次分发；账号风控与法律风险由使用者自行承担。')
+      expect(container.querySelector('.dsh-music-about-note')).toBeNull() // 已并入统一页脚，不再有独立 note
     } finally { }
   })
 
