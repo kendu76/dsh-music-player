@@ -145,7 +145,7 @@ const newsMetaFixture = {
 }
 const newsScheduleDefault = {
   enabled: true,
-  // 旧数据兼容用例：scope=null 的存量班次，卡片按全部预设类别兜底展示（defaultScope 已退役，不再出现在数据里）
+  // 旧数据兼容用例：scope=null 的存量定时任务，卡片按全部预设类别兜底展示（defaultScope 已退役，不再出现在数据里）
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
@@ -8966,9 +8966,9 @@ describe('news pane（新闻播报页签）', () => {
       expect(tab).toBeTruthy()
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 状态行：⏰ 每日定时 + 班次数（Host 自维护，无同步状态）
+      // 状态行：⏰ 每日定时 + 定时任务数（Host 自维护，无同步状态）
       expect(container.textContent).toContain('⏰ 每日定时')
-      expect(container.textContent).toContain('1 班次')
+      expect(container.textContent).toContain('1 个定时任务')
       // 期次行：标题 + 待播徽标 + 类别 chips
       expect(container.textContent).toContain('早间新闻播报')
       expect(container.textContent).toContain('待播')
@@ -9026,7 +9026,7 @@ describe('news pane（新闻播报页签）', () => {
     } finally { }
   })
 
-  it('定时编辑器：班次卡片/添加弹窗渲染，保存触发 POST', async () => {
+  it('定时编辑器：定时任务卡片/添加弹窗渲染，保存触发 POST', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -9041,25 +9041,25 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 班次卡片：时间 + 范围摘要 + 新闻条数 + 立即播放开关 + 操作按钮
+      // 定时任务卡片：时间 + 范围摘要 + 新闻条数 + 立即播放开关 + 操作按钮
       const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
       expect(cards.length).toBe(1)
       expect(cards[0].textContent).toContain('08:00')
       // 旧 null scope 兜底展示全部预设类别，不再有「默认 · 」前缀（defaultScope 已退役）
       expect(cards[0].textContent).toContain('热点/国内/国际/科技/财经/体育/娱乐')
       expect(cards[0].textContent.includes('默认 · ')).toBe(false)
-      // 卡片展示新闻条数：存量班次无 itemCount → 默认 8 条
+      // 卡片展示新闻条数：存量定时任务无 itemCount → 默认 8 条
       expect(cards[0].textContent).toContain('· 8 条')
       expect(cards[0].textContent).toContain('立即播放')
-      // 添加班次按钮位于班次标题右侧，点击弹出设置弹窗（不是平铺在编辑器里）
-      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      // 添加定时任务按钮位于定时任务标题右侧，点击弹出设置弹窗（不是平铺在编辑器里）
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加定时任务')
       expect(addBtn).toBeTruthy()
       act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       // 弹窗：标题 + 时刻输入 + 新闻条数 + 类别 chips + 确定（其它测试可能残留其它 overlay，按内容定位）
-      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加定时任务'))
       expect(overlay).toBeTruthy()
-      expect(overlay.textContent).toContain('添加班次')
+      expect(overlay.textContent).toContain('添加定时任务')
       const timeInput = overlay.querySelector('input[type="time"]')
       expect(timeInput).toBeTruthy()
       // 新闻条数输入：默认 8（1-20 范围）
@@ -9069,7 +9069,7 @@ describe('news pane（新闻播报页签）', () => {
       expect(overlay.textContent).toContain('条（1-20，默认 8')
       const chipBtns = [...overlay.querySelectorAll('.dsh-music-subtab')]
       expect(chipBtns.map((b) => b.textContent).indexOf('热点')).toBeGreaterThanOrEqual(0)
-      // 范围必填：新班次默认一个类别都不选 → 「添加」禁用（无提示文案，仅按钮置灰）；选一个类别 → 恢复可用
+      // 范围必填：新定时任务默认一个类别都不选 → 「添加」禁用（无提示文案，仅按钮置灰）；选一个类别 → 恢复可用
       expect(chipBtns.every((b) => !b.className.includes('active'))).toBe(true)
       const okBtn0 = [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加')
       expect(okBtn0.disabled).toBe(true)
@@ -9077,7 +9077,7 @@ describe('news pane（新闻播报页签）', () => {
       act(() => { chipBtns[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
-      // 改时刻后确定 → 新增班次（编辑器里的卡片从 1 变 2）
+      // 改时刻后确定 → 新增定时任务（编辑器里的卡片从 1 变 2）
       act(() => {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
         setter.call(timeInput, '21:30')
@@ -9094,7 +9094,7 @@ describe('news pane（新闻播报页签）', () => {
       // 已移除全局「默认类别」区块与手动「保存」按钮（编辑即自动保存）
       expect(container.textContent.includes('默认类别')).toBe(false)
       expect([...container.querySelectorAll('button')].some((b) => b.textContent === '保存')).toBe(false)
-      // 自动保存：防抖窗口（500ms）过后，POST 已把新增班次落盘（含默认新闻条数 8）
+      // 自动保存：防抖窗口（500ms）过后，POST 已把新增定时任务落盘（含默认新闻条数 8）
       await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
       expect(newsScheduleServer.shifts.length).toBe(2)
       expect(newsScheduleServer.shifts[0].time).toBe('08:00')
@@ -9105,7 +9105,7 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
-  it('定时编辑器：仅工作日班次显示「工作日」徽标，弹窗可勾选并落盘 workdaysOnly', async () => {
+  it('定时编辑器：仅工作日定时任务显示「工作日」徽标，弹窗可勾选并落盘 workdaysOnly', async () => {
     newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
     newsScheduleServer.shifts[0].workdaysOnly = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
@@ -9122,15 +9122,15 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 仅工作日班次卡片显示「工作日」徽标
+      // 仅工作日定时任务卡片显示「工作日」徽标
       const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
       expect(cards.length).toBe(1)
       expect(cards[0].textContent).toContain('工作日')
-      // 添加班次弹窗：仅工作日勾选框存在且默认不勾选（排在「收集后立即播放」之后）
-      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      // 添加定时任务弹窗：仅工作日勾选框存在且默认不勾选（排在「收集后立即播放」之后）
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加定时任务')
       act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加定时任务'))
       expect(overlay).toBeTruthy()
       expect(overlay.textContent).toContain('仅工作日执行（节假日除外）')
       const wdBoxes = [...overlay.querySelectorAll('input[type="checkbox"]')]
@@ -9150,7 +9150,7 @@ describe('news pane（新闻播报页签）', () => {
       const newShift = newsScheduleServer.shifts.find((s) => s.id !== 's1')
       expect(newShift).toBeTruthy()
       expect(newShift.workdaysOnly).toBe(true)
-      // 新班次卡片也显示「工作日」徽标
+      // 新定时任务卡片也显示「工作日」徽标
       const cardsAfter = [...container.querySelectorAll('.dsh-music-news-shift-card')]
       const added = cardsAfter.find((c) => c.textContent.includes(newShift.time))
       expect(added.textContent).toContain('工作日')
@@ -9173,8 +9173,8 @@ describe('news pane（新闻播报页签）', () => {
       const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 列表页签状态行提示收集中：显示班次时刻而非内部随机 id
-      expect(container.textContent).toContain('08:00 班次 收集中')
+      // 列表页签状态行提示收集中：显示定时任务时刻而非内部随机 id
+      expect(container.textContent).toContain('08:00 定时任务 收集中')
       expect(container.textContent).not.toContain('s1 收集中')
       // 进入定时编辑器：▶ 全部置灰且显示 ⟳
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
@@ -9191,7 +9191,7 @@ describe('news pane（新闻播报页签）', () => {
     }
   })
 
-  it('添加班次：自定义主题输入即生效，无需回车（保存时自动收进 topics）', async () => {
+  it('添加定时任务：自定义主题输入即生效，无需回车（保存时自动收进 topics）', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -9206,10 +9206,10 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加定时任务')
       act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加定时任务'))
       expect(overlay).toBeTruthy()
       // 不选类别、主题输入框为空 → 「添加」禁用
       expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(true)
@@ -9223,7 +9223,7 @@ describe('news pane（新闻播报页签）', () => {
       })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
-      // 直接点添加（不回车）→ 主题收进班次范围：topics=['AI']、categories=[]
+      // 直接点添加（不回车）→ 主题收进定时任务范围：topics=['AI']、categories=[]
       act(() => { [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(overlay.isConnected).toBe(false)
@@ -9292,7 +9292,7 @@ describe('news pane（新闻播报页签）', () => {
     expect(audio.src).toContain('from=2')
     act(() => { audio.emit('play') })
 
-    // (2) 班次新闻自动播报打断讲书
+    // (2) 定时任务新闻自动播报打断讲书
     intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
     await act(async () => { await intentPoll() })
     await tick(); await tick()
@@ -9347,7 +9347,7 @@ describe('news pane（新闻播报页签）', () => {
   })
 
   it('新闻播完自动切回被打断的本地音乐（断点续播）', async () => {
-    // 场景：音乐播放中 → 班次新闻自动播报（intent）→ 新闻自然播完 → 音乐从断点恢复。
+    // 场景：音乐播放中 → 定时任务新闻自动播报（intent）→ 新闻自然播完 → 音乐从断点恢复。
     bookTextFixture = '新闻块字幕。'
     manifest = {
       ...baseManifest(),
@@ -9412,7 +9412,7 @@ describe('news pane（新闻播报页签）', () => {
     act(() => { audio.emit('durationchange') })
     act(() => { audio.emit('timeupdate') })
 
-    // (2) 班次新闻自动播报（intent）打断音乐 → 虚拟书管线接管
+    // (2) 定时任务新闻自动播报（intent）打断音乐 → 虚拟书管线接管
     intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
     await act(async () => { await intentPoll() })
     await tick(); await tick()

@@ -81,7 +81,7 @@ describe('sanitizeEditionInput', () => {
     expect(r.value.categories[0].items[0].summary).toBe(long)
     expect(r.value.categories[0].items[1].summary).toBe(noPunct)
   })
-  it('limits 覆盖每类/全期上限（班次新闻条数配置：单类别可超过默认 8 条/类）', () => {
+  it('limits 覆盖每类/全期上限（定时任务新闻条数配置：单类别可超过默认 8 条/类）', () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ title: 't' + i, summary: 's' + i }))
     const r = sanitizeEditionInput(
       { categories: [{ name: '热点', items: many }] },
@@ -95,7 +95,7 @@ describe('sanitizeEditionInput', () => {
   })
 })
 
-describe('normalizeShiftItemCount（班次新闻条数规整）', () => {
+describe('normalizeShiftItemCount（定时任务新闻条数规整）', () => {
   it('默认 8，合法整数 1-20 原样保留', () => {
     expect(normalizeShiftItemCount(undefined)).toBe(8)
     expect(normalizeShiftItemCount(null)).toBe(8)
@@ -122,7 +122,7 @@ describe('evenItemQuota（多类别平均分配）', () => {
   })
 })
 
-describe('capCategoriesToQuota（按班次条数收敛各类别）', () => {
+describe('capCategoriesToQuota（按定时任务条数收敛各类别）', () => {
   it('多类别按配额截断，余数给靠前类别', () => {
     const cats = [
       { name: '热点', items: Array.from({ length: 6 }, (_, i) => ({ title: 'h' + i, summary: 's' })) },
@@ -272,10 +272,10 @@ describe('findInCooldown（冷却窗）', () => {
   it('窗口外返回 null', () => {
     expect(findInCooldown([e], { originShiftId: 's1', now: 1000 + LIMITS.cooldownMs })).toBe(null)
   })
-  it('不同班次不受影响', () => {
+  it('不同定时任务不受影响', () => {
     expect(findInCooldown([e], { originShiftId: 's2', now: 1001 })).toBe(null)
   })
-  it('取的是该班次最新一期判断', () => {
+  it('取的是该定时任务最新一期判断', () => {
     const older = { id: 'n0', originShiftId: 's1', createdAt: 100, categories: [] }
     expect(findInCooldown([older, e], { originShiftId: 's1', now: 1200 })).toBe(e)
   })
@@ -318,7 +318,7 @@ describe('summarizeEdition', () => {
 })
 
 describe('sanitizeSchedulePrefs', () => {
-  it('默认值与班次规整', () => {
+  it('默认值与定时任务规整', () => {
     const p = sanitizeSchedulePrefs({})
     expect(p.enabled).toBe(true)
     expect(p.shifts).toEqual([])
@@ -331,7 +331,7 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.defaultScope).toBeUndefined()
   })
-  it('班次时间非法被丢弃、超限截断、scope=null 兜底为全预设类别', () => {
+  it('定时任务时间非法被丢弃、超限截断、scope=null 兜底为全预设类别', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'a', time: '08:00', autoplay: false, scope: null },
@@ -344,7 +344,7 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope.topics.length).toBe(LIMITS.topicsPerShift)
   })
-  it('班次新闻条数：默认 8、越界收敛到 1-20', () => {
+  it('定时任务新闻条数：默认 8、越界收敛到 1-20', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'a', time: '08:00', itemCount: 12 },
@@ -355,7 +355,7 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.shifts.map((s) => s.itemCount)).toEqual([12, 1, 20, 8])
   })
-  it('班次「仅工作日执行」：显式 true 保留、缺失/非 true 一律 false', () => {
+  it('定时任务「仅工作日执行」：显式 true 保留、缺失/非 true 一律 false', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'a', time: '08:00', workdaysOnly: true },
@@ -376,7 +376,7 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope).toEqual({ categories: [], topics: ['AI'] })
   })
-  it('班次按触发时刻升序排列（乱序入参归一化）', () => {
+  it('定时任务按触发时刻升序排列（乱序入参归一化）', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'x', time: '12:30' },
@@ -386,7 +386,7 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.shifts.map((s) => s.time)).toEqual(['08:00', '09:00', '12:30'])
   })
-  it('班次数上限 6', () => {
+  it('定时任务数上限 6', () => {
     const shifts = Array.from({ length: 9 }, (_, i) => ({ time: `0${i}:00` }))
     expect(sanitizeSchedulePrefs({ shifts }).shifts.length).toBe(LIMITS.shifts)
   })
@@ -432,48 +432,48 @@ describe('runStateAlive（TTL 懒过期）', () => {
   })
 })
 
-describe('shiftFiresAt（班次到点判断）', () => {
+describe('shiftFiresAt（定时任务到点判断）', () => {
   // 2026-05-30 = 周六，2026-05-31 = 周日，2026-06-01 = 周一，2026-06-05 = 周五
   const SAT = new Date(2026, 4, 30) // 周六 getDay()=6
   const SUN = new Date(2026, 4, 31) // 周日 getDay()=0
   const MON = new Date(2026, 5, 1) // 周一 getDay()=1
   const FRI = new Date(2026, 5, 5) // 周五 getDay()=5
   const CAL = buildCalendar() // 2025/2026 内置工作日历（含法定节假日与调休补班）
-  it('普通班次（非仅工作日）每天到点都触发', () => {
+  it('普通定时任务（非仅工作日）每天到点都触发', () => {
     const shift = { time: '08:00', workdaysOnly: false }
     expect(shiftFiresAt(shift, SAT)).toBe(true)
     expect(shiftFiresAt(shift, SUN)).toBe(true)
     expect(shiftFiresAt(shift, MON)).toBe(true)
     expect(shiftFiresAt(shift, FRI)).toBe(true)
   })
-  it('仅工作日班次（无日历）：周六/周日跳过，周一至周五触发', () => {
+  it('仅工作日定时任务（无日历）：周六/周日跳过，周一至周五触发', () => {
     const shift = { time: '08:00', workdaysOnly: true }
     expect(shiftFiresAt(shift, SAT)).toBe(false)
     expect(shiftFiresAt(shift, SUN)).toBe(false)
     expect(shiftFiresAt(shift, MON)).toBe(true)
     expect(shiftFiresAt(shift, FRI)).toBe(true)
   })
-  it('仅工作日班次（带日历）：法定节假日放假不触发，即使落在工作日', () => {
+  it('仅工作日定时任务（带日历）：法定节假日放假不触发，即使落在工作日', () => {
     const shift = { time: '08:00', workdaysOnly: true }
     expect(shiftFiresAt(shift, new Date(2026, 9, 1), CAL)).toBe(false) // 周四·国庆
     expect(shiftFiresAt(shift, new Date(2026, 9, 2), CAL)).toBe(false) // 周五·国庆
     expect(shiftFiresAt(shift, new Date(2026, 8, 25), CAL)).toBe(false) // 周五·中秋
   })
-  it('仅工作日班次（带日历）：周末调休补班视为工作日照常触发', () => {
+  it('仅工作日定时任务（带日历）：周末调休补班视为工作日照常触发', () => {
     const shift = { time: '08:00', workdaysOnly: true }
     expect(shiftFiresAt(shift, new Date(2026, 9, 10), CAL)).toBe(true) // 周六·国庆补班
     expect(shiftFiresAt(shift, new Date(2026, 8, 20), CAL)).toBe(true) // 周日·国庆补班
   })
-  it('仅工作日班次（带日历）：普通工作日触发、普通周末跳过', () => {
+  it('仅工作日定时任务（带日历）：普通工作日触发、普通周末跳过', () => {
     const shift = { time: '08:00', workdaysOnly: true }
     expect(shiftFiresAt(shift, new Date(2026, 9, 12), CAL)).toBe(true) // 周一
     expect(shiftFiresAt(shift, new Date(2026, 9, 11), CAL)).toBe(false) // 周日
   })
-  it('旧数据（无 workdaysOnly 字段）按普通班次每天触发', () => {
+  it('旧数据（无 workdaysOnly 字段）按普通定时任务每天触发', () => {
     const shift = { time: '08:00' }
     expect(shiftFiresAt(shift, SAT)).toBe(true)
   })
-  it('无效班次返回 false（不触发）', () => {
+  it('无效定时任务返回 false（不触发）', () => {
     expect(shiftFiresAt(null, MON)).toBe(false)
     expect(shiftFiresAt(undefined, MON)).toBe(false)
     expect(shiftFiresAt('x', MON)).toBe(false)

@@ -129,7 +129,7 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
-  it('冷却窗：同班次 10 分钟内重复提交被跳过，force 可强制', async () => {
+  it('冷却窗：同定时任务 10 分钟内重复提交被跳过，force 可强制', async () => {
     const { newsBroadcast, cleanup } = boot()
     try {
       const body = { ...NEWS_BODY, shiftId: 's1' }
@@ -145,7 +145,7 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
-  it('班次触发的收集：期次标题由 Host 确定性命名为「M月D日 HH:MM 新闻播报」，覆盖 agent 起名', async () => {
+  it('定时任务触发的收集：期次标题由 Host 确定性命名为「M月D日 HH:MM 新闻播报」，覆盖 agent 起名', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       await handler(makeReq({
@@ -161,7 +161,7 @@ describe('news_broadcast 工具', () => {
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/news' }), res)
       const editions = JSON.parse(res.body).editions
-      // 标题日期取期次 date 字段（NEWS_BODY.date = 2026-05-30），时刻取班次配置
+      // 标题日期取期次 date 字段（NEWS_BODY.date = 2026-05-30），时刻取定时任务配置
       // （列表按 createdAt 降序，用 id 定位本期次）
       expect(editions.find((e) => e.id === out.editionId).title).toBe('5月30日 08:00 新闻播报')
       // 口播开场不重复追加日期（标题已含「M月D日」）
@@ -204,15 +204,15 @@ describe('news_broadcast 工具', () => {
       const rs = makeRes()
       await handler(makeReq({ url: '/dsh-music/news/runstate' }), rs)
       expect(JSON.parse(rs.body).run).toBeTruthy()
-      // 同班次再触发 → busy 拒绝
+      // 同定时任务再触发 → busy 拒绝
       const r2 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sa' }) }), r2)
       const d2 = JSON.parse(r2.body)
       expect(d2.ok).toBe(false)
       expect(d2.busy).toBe(true)
       expect(d2.fallback).toBe(false) // busy 不回退「复制指令」
-      expect(d2.error).toContain('已有收集进行中（08:00 班次）')
-      // 跨班次同样拒绝
+      expect(d2.error).toContain('已有收集进行中（08:00 定时任务）')
+      // 跨定时任务同样拒绝
       const r3 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sb' }) }), r3)
       expect(JSON.parse(r3.body).busy).toBe(true)
@@ -221,7 +221,7 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
-  it('班次范围精确性：范围外类别被过滤并在通知中说明；含主题时主题类别放行', async () => {
+  it('定时任务范围精确性：范围外类别被过滤并在通知中说明；含主题时主题类别放行', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       await handler(makeReq({
@@ -238,7 +238,7 @@ describe('news_broadcast 工具', () => {
       const out = await broadcast(newsBroadcast, mk())
       expect(out.ok).toBe(true)
       expect(out.items).toBe(1) // AI（2 条）被过滤
-      expect(out.notice).toContain('已按班次范围过滤范围外类别：AI（2 条）')
+      expect(out.notice).toContain('已按定时任务范围过滤范围外类别：AI（2 条）')
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/news' }), res)
       const ed = JSON.parse(res.body).editions.find((e) => e.id === out.editionId)
@@ -246,9 +246,9 @@ describe('news_broadcast 工具', () => {
       // 全部类别都越界 → 拒绝生成并说明范围
       const out2 = await broadcast(newsBroadcast, { ...mk(), categories: [{ name: 'AI', items: [{ title: 't', summary: 's', source: 'x' }] }] })
       expect(out2.ok).toBe(false)
-      expect(out2.notice).toContain('均不在班次范围内')
+      expect(out2.notice).toContain('均不在定时任务范围内')
       expect(out2.notice).toContain('科技')
-      // 班次声明了自定义主题 AI → 主题同名类别放行
+      // 定时任务声明了自定义主题 AI → 主题同名类别放行
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: { categories: ['科技'], topics: ['AI'] } }] }),
@@ -260,11 +260,11 @@ describe('news_broadcast 工具', () => {
         ] })
       expect(out3.ok).toBe(true)
       expect(out3.items).toBe(3)
-      expect(out3.notice).not.toContain('已按班次范围过滤')
+      expect(out3.notice).not.toContain('已按定时任务范围过滤')
     } finally { cleanup() }
   })
 
-  it('班次新闻条数：多类别按平均配额收敛（8 条 × 3 类 → 3/3/2）', async () => {
+  it('定时任务新闻条数：多类别按平均配额收敛（8 条 × 3 类 → 3/3/2）', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       await handler(makeReq({
@@ -289,7 +289,7 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
-  it('班次新闻条数：单类别可超过默认 8 条/类（limits 覆盖）', async () => {
+  it('定时任务新闻条数：单类别可超过默认 8 条/类（limits 覆盖）', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       await handler(makeReq({
@@ -303,7 +303,7 @@ describe('news_broadcast 工具', () => {
       const out = await broadcast(newsBroadcast, mk12())
       expect(out.ok).toBe(true)
       expect(out.items).toBe(12)
-      // 对话直接播报（无班次）仍受默认 8 条/类限制
+      // 对话直接播报（无定时任务）仍受默认 8 条/类限制
       const manual = await broadcast(newsBroadcast, {
         title: 'x', date: '2026-05-30',
         categories: [
@@ -314,7 +314,7 @@ describe('news_broadcast 工具', () => {
     } finally { cleanup() }
   })
 
-  it('不同班次互不影响冷却窗；手动组独立', async () => {
+  it('不同定时任务互不影响冷却窗；手动组独立', async () => {
     const { newsBroadcast, cleanup } = boot()
     try {
       await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's1' })
@@ -350,7 +350,7 @@ describe('news_broadcast 工具', () => {
 })
 
 describe('news_broadcast 工具层去重（RFC §7）', () => {
-  it('与当日已有期次重复的条目被剔除（跨班次去重兜底）', async () => {
+  it('与当日已有期次重复的条目被剔除（跨定时任务去重兜底）', async () => {
     const { newsBroadcast, cleanup } = boot()
     try {
       // 第一期提交「多地强降雨」。
@@ -433,10 +433,10 @@ describe('news_broadcast 工具层去重（RFC §7）', () => {
     } finally { cleanup() }
   })
 
-  it('当日同班次重复执行：候选冗余使去重后仍凑满班次条数（短收问题修复）', async () => {
+  it('当日同定时任务重复执行：候选冗余使去重后仍凑满定时任务条数（短收问题修复）', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
-      // 配置班次：8 条 × 3 类（热点/国内/国际），多类别平均分配 → 3/3/2。
+      // 配置定时任务：8 条 × 3 类（热点/国内/国际），多类别平均分配 → 3/3/2。
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({ enabled: true, shifts: [{ id: 's1', time: '08:00', autoplay: true, itemCount: 8, scope: { categories: ['热点', '国内', '国际'], topics: [] } }] }),
@@ -453,10 +453,10 @@ describe('news_broadcast 工具层去重（RFC §7）', () => {
       })
       expect(r1.ok).toBe(true)
       expect(r1.items).toBe(8) // 12 → 收敛到 8
-      // 第二次执行（同日同班次）：agent 交 1.5~2 倍候选，其中 3/3/2 条与第一次重复、
+      // 第二次执行（同日同定时任务）：agent 交 1.5~2 倍候选，其中 3/3/2 条与第一次重复、
       // 其余为全新事件 → 去重剔除重复后仍能凑满 8 条。
       const r2 = await broadcast(newsBroadcast, {
-        title: 'x', shiftId: 's1', date: '2026-05-30', force: true, // 同班次第二次执行（测试内同分钟，真实场景隔数小时）
+        title: 'x', shiftId: 's1', date: '2026-05-30', force: true, // 同定时任务第二次执行（测试内同分钟，真实场景隔数小时）
         categories: [
           {
             name: '热点', items: byName([
@@ -503,7 +503,7 @@ describe('news_schedule 工具', () => {
   it('get 返回偏好摘要（Host 自维护定时，无同步字段）', async () => {
     const { handler, newsSchedule, cleanup } = boot()
     try {
-      // 先配置一个班次，使 get 的 notice 落在「Host 自维护」分支。
+      // 先配置一个定时任务，使 get 的 notice 落在「Host 自维护」分支。
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({
@@ -714,7 +714,7 @@ describe('news 路由', () => {
       const p1 = JSON.parse(r1.body).schedulePrefs
       expect(p1.prefVersion).toBe(1)
       expect(p1.defaultScope).toBeUndefined() // defaultScope 已退役：入参字段被丢弃
-      expect(p1.shifts[0].itemCount).toBe(12) // 班次新闻条数落盘
+      expect(p1.shifts[0].itemCount).toBe(12) // 定时任务新闻条数落盘
       const r2 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r2)
       expect(JSON.parse(r2.body).schedulePrefs.prefVersion).toBe(1) // 未变化不递增
@@ -757,25 +757,25 @@ describe('news 路由', () => {
     } finally { cleanup() }
   })
 
-  it('不做每班次期数裁剪：当日期次全保留（跨天由每日清理移除）', async () => {
+  it('不做每定时任务期数裁剪：当日期次全保留（跨天由每日清理移除）', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       for (let i = 0; i < 9; i++) {
         await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's1', force: true, title: `第${i}期` })
       }
-      await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's2', force: true, title: '别班次' })
+      await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's2', force: true, title: '别定时任务' })
       const res = makeRes()
       // runstate 路由会顺带 loadNews 刷新内存态
       await handler(makeReq({ url: '/dsh-music/news' }), res)
       const editions = JSON.parse(res.body).editions
       const s1 = editions.filter((e) => e.originShiftId === 's1')
       const s2 = editions.filter((e) => e.originShiftId === 's2')
-      expect(s1.length).toBe(9) // 无每班次 7 期上限：9 期全保留
+      expect(s1.length).toBe(9) // 无每定时任务 7 期上限：9 期全保留
       expect(s2.length).toBe(1)
       // 列表按 createdAt 降序（同毫秒提交按插入序稳定排，不断言具体位置）
       const times = editions.map((e) => e.createdAt)
       expect(times).toEqual([...times].sort((a, b) => b - a))
-      expect(editions.some((e) => e.title === '别班次')).toBe(true)
+      expect(editions.some((e) => e.title === '别定时任务')).toBe(true)
     } finally { cleanup() }
   })
 })
@@ -821,7 +821,7 @@ describe('RSS 信源池（Host 后台自动懒拉取，无 UI / 无配置 API）
         text: async () => FAKE_RSS,
       }))
       vi.stubGlobal('fetch', fetchStub)
-      // 配置一个班次（schedule 路由仍存在）。
+      // 配置一个定时任务（schedule 路由仍存在）。
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
         body: JSON.stringify({ enabled: true, shifts: [{ id: 's9', time: '18:00', autoplay: false, itemCount: 8, scope: { categories: ['国内'], topics: [] } }] }),
@@ -834,13 +834,13 @@ describe('RSS 信源池（Host 后台自动懒拉取，无 UI / 无配置 API）
       // 懒拉取后条目已持久化入池（无池状态 API，直接查持久化文件）。
       const saved = JSON.parse(readFileSync(file, 'utf8'))
       expect(saved.pool.items.length).toBe(2)
-      // 收集指令注入了【信源池材料】（按班次范围预筛）。
+      // 收集指令注入了【信源池材料】（按定时任务范围预筛）。
       expect(agents.injected.length).toBe(1)
       expect(agents.injected[0].msg.content[0].text).toContain('信源池材料')
     } finally { cleanup(); vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }) }
   })
 
-  it('纯主题班次：official 级源条目标题不含主题词也注入【信源池材料】（RFC §5.2 规则 3）', async () => {
+  it('纯主题定时任务：official 级源条目标题不含主题词也注入【信源池材料】（RFC §5.2 规则 3）', async () => {
     const agents = makeAgents({
       agentsCreate: async (opts) => ({
         agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) },
@@ -923,7 +923,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(renamed.length).toBe(1)
       expect(renamed[0].sessionId).toBe(created[0].sessionId)
       expect(renamed[0].title).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} 科技\+主题:AI$/)
-      // 注入收集指令（含班次信息，无同步/begin 语义）
+      // 注入收集指令（含定时任务信息，无同步/begin 语义）
       expect(agents.injected.length).toBe(1)
       const text = agents.injected[0].msg.content[0].text
       expect(text).toContain('18:00')
@@ -932,10 +932,10 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).toContain('先不播放') // autoplay:false → 静默收集
       expect(text).toContain('科技')
       expect(text).toContain('AI')
-      // 指令携带班次新闻条数：8 条、2 个类别（科技 + 主题 AI）→ 每类约 4 条、多类别尽量平均分配
+      // 指令携带定时任务新闻条数：8 条、2 个类别（科技 + 主题 AI）→ 每类约 4 条、多类别尽量平均分配
       expect(text).toContain('本期共收集 8 条新闻')
       expect(text).toContain('尽量平均分配')
-      // 首次执行（当天该班次尚未执行过）：无去重风险 → 不附加候选冗余提示、不注入【已报条目】
+      // 首次执行（当天该定时任务尚未执行过）：无去重风险 → 不附加候选冗余提示、不注入【已报条目】
       expect(text).not.toContain('1.5~2 倍')
       expect(text).not.toContain('已报条目')
       // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
@@ -943,7 +943,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
     } finally { cleanup() }
   })
 
-  it('run-now 纯主题班次（categories 为空）：指令白名单只含主题、条数全部归该主题', async () => {
+  it('run-now 纯主题定时任务（categories 为空）：指令白名单只含主题、条数全部归该主题', async () => {
     let created = []
     const agents = makeAgents({
       agentsCreate: async (opts) => {
@@ -969,7 +969,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(agents.injected.length).toBe(1)
       const text = agents.injected[0].msg.content[0].text
       // 范围白名单只含主题：不能像修复前那样把空类别误扩成 7 个预设类别——那些类别在
-      // news_broadcast 工具层会被当范围外整体过滤，导致 8 条被滤剩 2 条（11:00 AI 班次曾出）。
+      // news_broadcast 工具层会被当范围外整体过滤，导致 8 条被滤剩 2 条（11:00 AI 定时任务曾出）。
       expect(text).toContain('categories 只能使用：AI')
       expect(text).not.toContain('热点、国内、国际、科技、财经、体育、娱乐')
       expect(text).not.toContain('尽量平均分配') // 单类别：条数全部归该主题，无均摊提示
@@ -1003,7 +1003,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
         ] }],
       })
       expect(b1.ok).toBe(true)
-      // 再次 run-now：指令应注入【已报条目】清单 + 候选冗余提示（当天本班次已执行过）。
+      // 再次 run-now：指令应注入【已报条目】清单 + 候选冗余提示（当天本定时任务已执行过）。
       const res = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's9' }) }), res)
       expect(JSON.parse(res.body).ok).toBe(true)
@@ -1012,7 +1012,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).toContain('已报条目')
       expect(text).toContain('AI 大模型发布')
       expect(text).toContain('优先收集未在清单中的新条目')
-      // 当天该班次已执行过 → 附带「1.5~2 倍提交候选」去重缓冲提示（按需冗余，不浪费首次执行）
+      // 当天该定时任务已执行过 → 附带「1.5~2 倍提交候选」去重缓冲提示（按需冗余，不浪费首次执行）
       expect(text).toContain('1.5~2 倍提交候选')
     } finally { cleanup() }
   })
@@ -1045,7 +1045,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
           ],
         }),
       }), makeRes())
-      // 两个班次各收集一期
+      // 两个定时任务各收集一期
       const rr1 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), rr1)
       const sid1 = JSON.parse(rr1.body).sessionId
@@ -1152,7 +1152,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
     } finally { b.cleanup(); rmSync(home, { recursive: true, force: true }) }
   })
 
-  it('run-now 未知班次返回 404，不创建执行会话', async () => {
+  it('run-now 未知定时任务返回 404，不创建执行会话', async () => {
     const agents = makeAgents()
     const { handler, cleanup } = boot({ agentsService: agents.service })
     try {
