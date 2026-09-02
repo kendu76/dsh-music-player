@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   PRESET_CATEGORIES, LIMITS, cnOrdinal, formatDateCn, sanitizeEditionInput,
-  renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown, partitionStaleNews,
+  renderScript, splitScriptChunks, buildEdition, findInCooldown, partitionStaleNews,
   summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
   sanitizeModelSelection, runStateAlive, shiftFiresAt,
   normalizeShiftItemCount, evenItemQuota, capCategoriesToQuota,
@@ -261,29 +261,6 @@ describe('buildEdition', () => {
   it('estimateMinutes 至少 1 分钟且随字数增长', () => {
     expect(estimateMinutes(10)).toBe(1)
     expect(estimateMinutes(1500)).toBeGreaterThan(estimateMinutes(300))
-  })
-})
-
-describe('applyRetention（每任务独立 7 期）', () => {
-  const mk = (id, shift, createdAt) => ({ id, originShiftId: shift, createdAt, categories: [] })
-  it('高频班次不挤占低频班次的窗口', () => {
-    const editions = []
-    // s-ai：9 期；s-morning：3 期（时间交错）
-    for (let i = 0; i < 9; i++) editions.push(mk('ai' + i, 's-ai', 1000 + i * 10))
-    for (let i = 0; i < 3; i++) editions.push(mk('mo' + i, 's-morning', 1005 + i * 10))
-    const kept = applyRetention(editions)
-    const ai = kept.filter((e) => e.originShiftId === 's-ai')
-    const mo = kept.filter((e) => e.originShiftId === 's-morning')
-    expect(ai.length).toBe(LIMITS.retentionPerShift)
-    expect(mo.length).toBe(3) // 低频班次的 3 期全部保留，未被挤掉
-    expect(ai.map((e) => e.id)).toEqual(['ai2', 'ai3', 'ai4', 'ai5', 'ai6', 'ai7', 'ai8'])
-  })
-  it('手动组独立计数', () => {
-    const editions = Array.from({ length: 8 }, (_, i) => mk('m' + i, 'manual', i))
-    editions.push(mk('x1', 's-x', 100))
-    const kept = applyRetention(editions)
-    expect(kept.filter((e) => e.originShiftId === 'manual').length).toBe(LIMITS.retentionPerShift)
-    expect(kept.some((e) => e.id === 'x1')).toBe(true)
   })
 })
 

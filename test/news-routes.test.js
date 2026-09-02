@@ -10,7 +10,6 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { apply } from '../lib/index.js'
-import { LIMITS } from '../lib/news-core.js'
 
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' } = {}) {
   const req = { method, url, headers }
@@ -758,7 +757,7 @@ describe('news 路由', () => {
     } finally { cleanup() }
   })
 
-  it('每任务 7 期滚动保留在路由层生效', async () => {
+  it('不做每班次期数裁剪：当日期次全保留（跨天由每日清理移除）', async () => {
     const { handler, newsBroadcast, cleanup } = boot()
     try {
       for (let i = 0; i < 9; i++) {
@@ -771,7 +770,7 @@ describe('news 路由', () => {
       const editions = JSON.parse(res.body).editions
       const s1 = editions.filter((e) => e.originShiftId === 's1')
       const s2 = editions.filter((e) => e.originShiftId === 's2')
-      expect(s1.length).toBe(LIMITS.retentionPerShift)
+      expect(s1.length).toBe(9) // 无每班次 7 期上限：9 期全保留
       expect(s2.length).toBe(1)
       // 列表按 createdAt 降序（同毫秒提交按插入序稳定排，不断言具体位置）
       const times = editions.map((e) => e.createdAt)
