@@ -4193,6 +4193,337 @@ describe('dsh-music-player client render smoke', () => {
     expect([...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].some((b) => b.textContent === '加载更多')).toBe(false)
   })
 
+  it('QQ 歌单详情「播放全部」：整列表入队、从第一首开始播，播完自动接下一首', async () => {
+    qqLoggedIn = true
+    const audios = []
+    class QQAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QQAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const card = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { card.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 歌单详情头出现「播放全部」
+    const playAllBtn = [...container.querySelectorAll('.dsh-music-qq-playall')].find((b) => b.textContent.includes('播放全部'))
+    expect(playAllBtn).toBeTruthy()
+    act(() => { playAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 从第一首开始播（告白气球 songmid=789），第一行 active
+    expect(audio.src).toContain('/dsh-music/qq/play/789')
+    const qqPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const rows = [...qqPane.querySelectorAll('.dsh-music-track-row')]
+    expect(rows[0].classList.contains('active')).toBe(true)
+    expect(rows[0].textContent).toContain('告白气球')
+    expect(rows[1].classList.contains('active')).toBe(false)
+    // 整列表入队：第一首播完自动接第二首（七里香 songmid=790）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/qq/play/790')
+  })
+
+  it('QQ 排行榜「播放全部」：从第一首开始播，整列入队自动接下一首', async () => {
+    qqLoggedIn = true
+    const audios = []
+    class QQAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QQAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const topsTab = await waitForText(container, '.dsh-music-qq-viewtab', '排行榜')
+    act(() => { topsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const chart = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('飙升榜'))
+    act(() => { chart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const playAllBtn = [...container.querySelectorAll('.dsh-music-qq-playall')].find((b) => b.textContent.includes('播放全部'))
+    expect(playAllBtn).toBeTruthy()
+    act(() => { playAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 从第一首开始播（飙升歌一 songmid=a），第一行 active
+    expect(audio.src).toContain('/dsh-music/qq/play/a')
+    const qqPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const rows = [...qqPane.querySelectorAll('.dsh-music-track-row')]
+    expect(rows[0].classList.contains('active')).toBe(true)
+    expect(rows[0].textContent).toContain('飙升歌一')
+    // 整列入队：自动接下一首（飙升歌二 songmid=b）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/qq/play/b')
+  })
+
+  it('QQ 新歌速递「播放全部」：从第一首开始播，整列入队自动接下一首', async () => {
+    qqLoggedIn = true
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u.startsWith('/dsh-music/qq/new-songs')) return jsonRes({ ok: true, result: { type: 5, label: '最新', songs: [
+        { id: 'n1', songmid: 'n1', title: '新歌一号', artists: ['歌手A'], album: '', interval: 200, payplay: 0, source: 'qq' },
+        { id: 'n2', songmid: 'n2', title: '新歌二号', artists: ['歌手B'], album: '', interval: 200, payplay: 0, source: 'qq' },
+      ] } })
+      return baseFetch(url, opts)
+    })
+    const audios = []
+    class QQAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QQAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const newTab = await waitForText(container, '.dsh-music-qq-viewtab', '新歌')
+    act(() => { newTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 新歌头出现「播放全部」
+    const playAllBtn = [...container.querySelectorAll('.dsh-music-qq-playall')].find((b) => b.textContent.includes('播放全部'))
+    expect(playAllBtn).toBeTruthy()
+    act(() => { playAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 从第一首开始播（新歌一号 songmid=n1），第一行 active
+    expect(audio.src).toContain('/dsh-music/qq/play/n1')
+    const qqPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const rows = [...qqPane.querySelectorAll('.dsh-music-track-row')]
+    expect(rows[0].classList.contains('active')).toBe(true)
+    expect(rows[0].textContent).toContain('新歌一号')
+    // 整列入队：自动接下一首（新歌二号 songmid=n2）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/qq/play/n2')
+  })
+
+  it('酷狗歌单详情「播放全部」：整列表入队、从第一首开始播，播完自动接下一首', async () => {
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u.startsWith('/dsh-music/kg/search')) return jsonRes({ ok: true, results: [], page: 1, total: 0 })
+      if (u.startsWith('/dsh-music/kg/playlist-search')) return jsonRes({ ok: true, page: 1, playlists: [
+        { id: '6409645', name: '周杰伦必听热歌', creatorId: '2132029040', gid: 'collection_3_2132029040_287_0', slid: '287', creator: '酷乐推荐', trackCount: 2, source: 'kugou', cover: '' },
+      ] })
+      if (u === '/dsh-music/kg/playlist/6409645') return jsonRes({ ok: true, playlist: {
+        id: '6409645', name: '周杰伦必听热歌', creatorId: '2132029040', gid: 'collection_3_2132029040_287_0', slid: '287', creator: '酷乐推荐',
+        description: '', songs: [
+          { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+          { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+        ],
+      } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const searchTab = await waitForText(kgPane, '.dsh-music-qq-viewtab', '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = kgPane.querySelector('.dsh-music-qq-input')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '周杰伦必听热歌')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const plCard = [...kgPane.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('周杰伦必听热歌'))
+    expect(plCard).toBeTruthy()
+    act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const playAllBtn = [...kgPane.querySelectorAll('.dsh-music-qq-playall')].find((b) => b.textContent.includes('播放全部'))
+    expect(playAllBtn).toBeTruthy()
+    act(() => { playAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 从第一首开始播（酷狗一号 hash=KG1），第一行 active
+    expect(audio.src).toContain('/dsh-music/kg/play/KG1')
+    const rows = [...kgPane.querySelectorAll('.dsh-music-track-row')]
+    expect(rows[0].classList.contains('active')).toBe(true)
+    expect(rows[0].textContent).toContain('酷狗一号')
+    // 整列表入队：播完自动接第二首（酷狗二号 hash=KG2）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/kg/play/KG2')
+  })
+
+  it('酷狗排行榜「播放全部」：从第一首开始播，整列入队自动接下一首', async () => {
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/top-lists') return jsonRes({ ok: true, groups: [{ id: '', name: '热门榜单', toplists: [{ id: '8888', name: '飙升榜', cover: '' }] }] })
+      if (u.includes('/dsh-music/kg/top-songs')) {
+        const all = [
+          { id: 'kg0', hash: '0'.repeat(32), title: '飙升歌一', artists: ['歌手A'], source: 'kugou' },
+          { id: 'kg1', hash: '1'.repeat(32), title: '飙升歌二', artists: ['歌手B'], source: 'kugou' },
+        ]
+        return jsonRes({ ok: true, toplist: { id: '8888', name: '飙升榜', total: all.length, hasMore: false, songs: all } })
+      }
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const topsTab = await waitForText(kgPane, '.dsh-music-qq-viewtab', '排行榜')
+    act(() => { topsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const chart = [...kgPane.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('飙升榜'))
+    act(() => { chart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const playAllBtn = [...kgPane.querySelectorAll('.dsh-music-qq-playall')].find((b) => b.textContent.includes('播放全部'))
+    expect(playAllBtn).toBeTruthy()
+    act(() => { playAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 从第一首开始播（飙升歌一 hash=全0），第一行 active
+    expect(audio.src).toContain('/dsh-music/kg/play/' + '0'.repeat(32))
+    const rows = [...kgPane.querySelectorAll('.dsh-music-track-row')]
+    expect(rows[0].classList.contains('active')).toBe(true)
+    expect(rows[0].textContent).toContain('飙升歌一')
+    // 整列入队：自动接下一首（飙升歌二 hash=全1）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/kg/play/' + '1'.repeat(32))
+  })
+
   it('remembers search keywords and lets you pick one from the dropdown', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
