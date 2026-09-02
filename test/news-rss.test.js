@@ -274,6 +274,25 @@ describe('filterPoolForScope', () => {
     const r = filterPoolForScope(pool, { categories: ['国内', '科技', '娱乐'] }, { limit: 2 })
     expect(r).toHaveLength(2)
   })
+  it('official 级源无条件命中（RFC §5.2 规则 3）：标题/类别不带主题关键词也命中', () => {
+    const items = [
+      { title: '宏观政策落地', feedTitle: '新华社', feedCategory: '国内', feedTier: 'official', publishedAt: 300 },
+      { title: 'AI 模型发布', feedTitle: 'IT之家', feedCategory: '科技', feedTier: 'major', publishedAt: 200 },
+      { title: '某 AI 大会', feedTitle: '36氪', feedCategory: '科技', feedTier: 'kol', publishedAt: 100 },
+      { title: '无关娱乐', feedTitle: '新浪娱乐', feedCategory: '娱乐', feedTier: 'major', publishedAt: 50 },
+    ]
+    const r = filterPoolForScope(items, { categories: [], topics: ['AI'] })
+    // official 源条目标题无关键词也注入；major/kol 仍按关键词命中；major 且不相关的不命中
+    expect(r.map((p) => p.title)).toEqual(['宏观政策落地', 'AI 模型发布', '某 AI 大会'])
+  })
+  it('official 无条件命中但已报过（usedIn 非空）仍排除', () => {
+    const items = [
+      { title: '宏观政策落地', feedTitle: '新华社', feedCategory: '国内', feedTier: 'official', usedIn: ['news-1'], publishedAt: 300 },
+      { title: 'AI 模型发布', feedTitle: 'IT之家', feedCategory: '科技', feedTier: 'major', publishedAt: 200 },
+    ]
+    const r = filterPoolForScope(items, { categories: [], topics: ['AI'] })
+    expect(r.map((p) => p.title)).toEqual(['AI 模型发布'])
+  })
 })
 
 describe('poolSummary', () => {

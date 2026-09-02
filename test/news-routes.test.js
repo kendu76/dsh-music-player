@@ -840,6 +840,55 @@ describe('RSS 信源池（Host 后台自动懒拉取，无 UI / 无配置 API）
       expect(agents.injected[0].msg.content[0].text).toContain('信源池材料')
     } finally { cleanup(); vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }) }
   })
+
+  it('纯主题班次：official 级源条目标题不含主题词也注入【信源池材料】（RFC §5.2 规则 3）', async () => {
+    const agents = makeAgents({
+      agentsCreate: async (opts) => ({
+        agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) },
+      }),
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    const file = join(home, '.dsh', 'music-player-news.json')
+    mkdirSync(join(home, '.dsh'), { recursive: true })
+    // 池内预置两条（池条目只带 feedId，元信息在注入时从 feeds 表补全）：
+    //   - official 源（新华社/国内）：标题不含主题词 —— 应无条件命中（RFC §5.2 规则 3）；
+    //   - major 源（IT之家/科技）：标题含主题词 —— 按关键词命中。
+    const now = Date.now()
+    writeFileSync(file, JSON.stringify({
+      version: 2,
+      editions: [], schedulePrefs: {}, runState: null, failures: [],
+      rss: {
+        enabled: true, defaultVersion: 2, custom: true,
+        feeds: [
+          { id: 'xh', url: 'https://example.com/xh', title: '新华社', tier: 'official', category: '国内' },
+          { id: 'it', url: 'https://example.com/it', title: 'IT之家', tier: 'major', category: '科技' },
+        ],
+      },
+      pool: { enabled: true, fetchedAt: now, items: [
+        { feedId: 'xh', title: '宏观政策落地', url: 'https://example.com/xh/1', publishedAt: now - 1000, summary: 's', hash: 'h1', firstSeen: now, usedIn: [] },
+        { feedId: 'it', title: 'AI 模型发布', url: 'https://example.com/it/1', publishedAt: now - 2000, summary: 's', hash: 'h2', firstSeen: now, usedIn: [] },
+      ] },
+    }), 'utf8')
+    const { handler, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} }, home })
+    try {
+      // 收集前懒拉取会 fetch 各 feed：stub 返回空 RSS，不新增条目、不干扰预置池。
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, text: async () => '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>' })))
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: true, shifts: [{ id: 'sA', time: '11:00', autoplay: false, itemCount: 8, scope: { categories: [], topics: ['AI'] } }] }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sA' }) }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      expect(agents.injected.length).toBe(1)
+      const text = agents.injected[0].msg.content[0].text
+      expect(text).toContain('信源池材料')
+      expect(text).toContain('宏观政策落地') // official 源：标题无 AI 关键词也注入
+      expect(text).toContain('AI 模型发布')  // major 源：标题含 AI 关键词按主题命中
+    } finally { cleanup(); vi.unstubAllGlobals(); rmSync(home, { recursive: true, force: true }) }
+  })
 })
 
 describe('run-now（统一执行入口：定时到点 / 手动立即执行共用）', () => {
@@ -892,6 +941,41 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).not.toContain('已报条目')
       // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
       expect(text).toMatch(/今天是 \d{4}年\d{1,2}月\d{1,2}日 星期[日一二三四五六]，当前时间 \d{2}:\d{2}/)
+    } finally { cleanup() }
+  })
+
+  it('run-now 纯主题班次（categories 为空）：指令白名单只含主题、条数全部归该主题', async () => {
+    let created = []
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created.push(opts)
+        return { agent: { id: opts.sessionId, session: { id: opts.sessionId }, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) } }
+      },
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const { handler, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} } })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 'sA', time: '11:00', autoplay: false, itemCount: 8, scope: { categories: [], topics: ['AI'] } }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'sA' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(agents.injected.length).toBe(1)
+      const text = agents.injected[0].msg.content[0].text
+      // 范围白名单只含主题：不能像修复前那样把空类别误扩成 7 个预设类别——那些类别在
+      // news_broadcast 工具层会被当范围外整体过滤，导致 8 条被滤剩 2 条（11:00 AI 班次曾出）。
+      expect(text).toContain('categories 只能使用：AI')
+      expect(text).not.toContain('热点、国内、国际、科技、财经、体育、娱乐')
+      expect(text).not.toContain('尽量平均分配') // 单类别：条数全部归该主题，无均摊提示
+      expect(text).toContain('本期共收集 8 条新闻，全期不超过 8 条')
+      expect(text).toContain('主题:AI')
     } finally { cleanup() }
   })
 
