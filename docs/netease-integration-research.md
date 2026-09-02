@@ -14,6 +14,22 @@
 > （无需 3DES/QRC 那类自定义解密）、扫码登录两跳直达 MUSIC_U、搜索/歌词/歌单/取链匿名即可用。
 > 主要不确定点集中在「登录态高音质取链」与「YRC 逐字歌词」，需登录后复测（§5/§6）。
 
+## 实施状态（2026-09-02，已完成 P0+P1 核心 + P2 部分）
+
+本报告的方案已按 §6 建议落地实现：
+
+| 模块 | 文件 | 内容 |
+|---|---|---|
+| 底层模块 | `lib/netease.js` | 三套加密（weapi/linuxapi/eapi）纯函数、搜索（linuxapi+weapi 双路、多分型）、LRC+翻译+YRC 歌词、歌单（推荐/分类/广场/详情 trackIds+批量/我的歌单）、官方榜单 63 榜、匿名取链（免费 320k / VIP 45s 试听 / 版权 404）、扫码登录（interface.music.163.com 裸表单两跳） |
+| 内嵌二维码 | `lib/vendor/qrcode.mjs` | MIT qrcode-generator（kazuhikoarase），Host 端把 codekey URL 渲染成 SVG data URL |
+| 逐字歌词 | `lib/yrc.js` | YRC 行/词解析（输出形状 = qrc.js/krc.js 的 {t,end,text}，lib/lyric.js 编排层零改动接入） |
+| Host 路由 | `lib/index.js` | `/dsh-music/nc/*`：status/login(start·check·logout)/search/play(流式代理+真实品质头 X-DSH-NC-Quality+试听头 X-DSH-NC-Trial)/lyric/playlists/playlist-*/my-playlists/**playlist-collect(收藏/取消，需登录)**/top-lists/top-songs；cookie 持久化 `~/.dsh/music-player-netease-cookie.json`(0600)；`music_play` 工具新增 `source='netease'` 在线播放 |
+| 本地歌词兜底 | `lib/lyric.js` | 兜底链扩为 QQ → 酷狗 → 网易云 → LRCLIB |
+| 浏览器 UI | `lib/client.js` | 新增「网易云」侧栏页签：**登录门禁与 QQ/酷狗一致**（未登录只显示扫码登录入口+使用声明）、扫码登录、推荐/分类歌单、排行榜、我的歌单（登录）、搜索（歌曲+歌单+历史+加载更多）、歌单详情/榜单「▶ 播放全部」、**公开歌单详情页收藏/取消收藏按钮（对齐酷狗）**、YRC 逐字/LRC+翻译歌词、品质徽章+试听标记、播放队列/进度独立持久化（`dsh-music-nc-playback`）、失败自动跳下一首；匿名取链能力保留在后端供 `music_play source=netease` 与本地歌词兜底链使用 |
+| 测试 | `test/netease.test.js` + test/lyric.test.js 更新 | 加密确定性向量（eapi/linuxapi 复算、weapi 结构不变量）、歌曲归一化、YRC 行/词解析、QR SVG、兜底链四跳 |
+
+已验证：全量 vitest 685 项通过（含新增 14 项）；fake-ctx 起服务实测 13 条 nc 路由（状态/出码/轮询/搜索/歌单搜索/推荐/分类/榜单/榜单歌曲/歌单详情 200 首批量/歌词含翻译/320k 代理 HEAD/版权受限 404/未登录 401）+ 收藏路由的 401/400 分支。**2025-09 真实登录态（杜双庆 uid 419672727）补充实测**：收藏/取消收藏歌单已双向验证通过（weapi 主路 + 真实 __csrf，见 §4.4 收藏行）；「我的歌单」读取正常；eapi 老端点 404 结论确认。仍待用户验证：登录态高音质取链（需 VIP 账号）。YRC 逐字歌词匿名抽样为空（覆盖面问题），已按「有则用、无则回落 LRC」实现。
+
 ## 0. 与现有双源的能力对照速览
 
 | 维度 | QQ 音乐（现状） | 酷狗（现状） | **网易云（本次调研）** | 对齐判定 |
@@ -196,7 +212,8 @@ POST https://interface3.music.163.com/eapi/…
 | 超大歌单曲目 | v6/v3 详情取 trackIds → weapi `/weapi/v3/song/detail` {c:"[{id}…]", ids:"[…]"} | 否 | ✅实测（3/3）；**批 500**，酷狗 QRC 大歌单同思路 |
 | 官方榜单 | GET `/api/toplist` → 列表；榜单 id 即歌单 id | 否 | ✅实测 63 榜，复用详情路线 |
 | **我的歌单** | weapi `/weapi/user/playlist` {uid, limit, offset, includeVideo} | **uid 从登录态拿** | 首个即「我喜欢的音乐」（对齐 QQ dirId=201/酷狗默认歌单语义） |
-| 收藏/创建/加歌/删歌 | `/weapi/playlist/manipulate/tracks`、`/weapi/playlist/create`、`/weapi/playlist/delete` 等 | 是 | 本次未实测；Binaryify 系实现最成熟、社区生产验证充分，接入时照抄语义 |
+| **收藏/取消收藏歌单** | **weapi** `/weapi/playlist/subscribe\|unsubscribe` {id, **csrf_token 取 cookie 的 __csrf**}（主路）+ eapi `/eapi/playlist/subscribe\|unsubscribe` {id, checkToken:'v2'}（兜底探测） | 是 | **2025-09 真实登录态实测**：eapi 老端点即使带登录态也返回 `404「接口未找到」`（不可作主路）；weapi 是唯一可行路，且 csrf_token 空串会被服务端 `403 illegal request` 拒绝，必须填 cookie 里的 `__csrf`。实现见 `lib/netease.js#subscribePlaylist` |
+| 创建/加歌/删歌 | `/weapi/playlist/manipulate/tracks`、`/weapi/playlist/create`、`/weapi/playlist/delete` 等 | 是 | 本次未实现；Binaryify 系实现最成熟、社区生产验证充分，接入时照抄语义 |
 
 ### 4.5 取播放 URL（核心差异点：**匿名即可播**，登录解锁高音质）
 

@@ -1,5 +1,5 @@
 /**
- * Unit tests for lib/lyric.js — 本地歌曲在线歌词兜底（QQ → LRCLIB）。
+ * Unit tests for lib/lyric.js — 本地歌曲在线歌词兜底（QQ → 酷狗 → 网易云 → LRCLIB）。
  *
  * 打分/归一化是纯函数，直接测；getOnlineLyric 通过 stub 全局 fetch 按 URL 分发
  * QQ 搜索 / QQ 歌词 / LRCLIB 搜索 三种响应，验证兜底顺序与降级行为。
@@ -196,7 +196,9 @@ describe('getOnlineLyric (QQ → LRCLIB 兜底)', () => {
     const hit = await getOnlineLyric({ title: '七里香' })
     expect(hit).not.toBeNull()
     expect(hit.source).toBe('lrclib')
-    // QQ 搜索失败后仍依次尝试 酷狗（songsearch.kugou.com）→ LRCLIB，链路不被单个源拖垮
-    expect(callLog.length).toBe(3)
+    // QQ 搜索失败后仍依次尝试 酷狗 → 网易云 → LRCLIB，链路不被单个源拖垮
+    // （callLog = QQ 1 + 酷狗 1 + 网易云 2（linux 主路失败 → weapi 备路，stub 均抛）
+    //   + LRCLIB 1 = 5 跳）
+    expect(callLog.length).toBe(5)
   })
 })

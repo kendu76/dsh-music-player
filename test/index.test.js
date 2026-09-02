@@ -406,6 +406,73 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts NetEase-related prefs (nc-playback / nc-history) through the allowlist (persistence regression)', async () => {
+    // 回归：网易云播放进度+队列曾漏出 Host 白名单，POST 被 sanitizePrefs 静默丢弃，
+    // 导致「播网易云时刷新页面，播放条不显示刚才的歌曲」（restoreLatest 找不到网易云
+    // 记录、ncTs=-1，无记录可恢复）。nc-playback / nc-history 必须能存、能 GET 回读——
+    // 否则刷新后网易云播放数据不落盘。
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-nc-playback': JSON.stringify({ id: 'nc:2652820720', name: '晴天', artists: ['周杰伦'], position: 42, duration: 260, queue: [{ id: '2652820720', title: '晴天', artists: ['周杰伦'], fee: 0 }], source: '在线', ts: 1234567890 }),
+          'dsh-music-nc-history': JSON.stringify(['周杰伦', '网易云热搜']),
+        } }) }),
+        res,
+      )
+      let d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      const saved = JSON.parse(d.prefs['dsh-music-nc-playback'])
+      expect(saved.id).toBe('nc:2652820720')
+      expect(saved.position).toBe(42)
+      expect(saved.queue[0].id).toBe('2652820720')
+      expect(JSON.parse(d.prefs['dsh-music-nc-history'])).toContain('周杰伦')
+      // GET 回读：快照里确实持久化了网易云记录
+      const g = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/prefs' }), g)
+      const gd = JSON.parse(g.body)
+      expect(JSON.parse(gd.prefs['dsh-music-nc-playback']).id).toBe('nc:2652820720')
+      expect(JSON.parse(gd.prefs['dsh-music-nc-history'])).toContain('网易云热搜')
+    } finally { cleanup() }
+  })
+
+  it('nc 写路由（create/delete/add/remove）未登录返回 401、缺参返回 400（不发外部请求）', async () => {
+    // 网易云自建歌单写操作路由：与 playlist-collect 同门禁——未登录（无 cookie 文件）
+    // 必须 401 且绝不发外部网络请求；参数不合法必须 400。
+    const { handler, cleanup } = boot()
+    try {
+      // 未登录：全部 401
+      for (const [url, body] of [
+        ['/dsh-music/nc/playlist-create', JSON.stringify({ name: '测试歌单' })],
+        ['/dsh-music/nc/playlist-delete', JSON.stringify({ id: '123' })],
+        ['/dsh-music/nc/playlist-add', JSON.stringify({ id: '123', songIds: ['456'] })],
+        ['/dsh-music/nc/playlist-remove', JSON.stringify({ id: '123', songIds: ['456'] })],
+      ]) {
+        const res = makeRes()
+        await handler(makeReq({ method: 'POST', url, body }), res)
+        const d = JSON.parse(res.body)
+        expect(res.status).toBe(401)
+        expect(d.ok).toBe(false)
+        expect(d.error).toContain('未登录')
+      }
+      // 参数校验 400（空歌单名 / 缺歌单 id / 缺歌曲 id）
+      const bad = [
+        ['/dsh-music/nc/playlist-create', JSON.stringify({ name: '' })],
+        ['/dsh-music/nc/playlist-delete', JSON.stringify({ id: 'abc' })],
+        ['/dsh-music/nc/playlist-add', JSON.stringify({ id: '123' })],
+        ['/dsh-music/nc/playlist-remove', JSON.stringify({ id: '123', songIds: [] })],
+      ]
+      for (const [url, body] of bad) {
+        const res = makeRes()
+        await handler(makeReq({ method: 'POST', url, body }), res)
+        const d = JSON.parse(res.body)
+        expect(res.status).toBe(400)
+        expect(d.ok).toBe(false)
+      }
+    } finally { cleanup() }
+  })
+
   it('accepts the lyric fx pref through the allowlist, drops invalid fx and non-config keys (persistence regression)', async () => {
     // 回归：新配置键若漏出 Host 白名单，POST 会被 sanitizePrefs 静默丢弃，
     // 表现为「歌词动效设置刷新后重置」。fx 必须能存、能 GET 回读；
