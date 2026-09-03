@@ -760,6 +760,85 @@ describe('dsh-music-player client render smoke', () => {
     expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('radio')
   })
 
+  it('电台播放时播放条显示爱心按钮：点击收藏/取消收藏（走 Host /radio/favs）', async () => {
+    // 回归：播放条爱心曾对电台隐藏（!isRadio）。电台收藏已支持 → 播放条也应
+    // 能收藏/取消当前电台并点亮爱心（与列表 ♡ 同源：Host /radio/favs + store.radioFavs）。
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    let favsServer = [] // 模拟 Host 收藏夹
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/intent') return jsonRes(intent)
+      if (u === '/dsh-music/radio/favs' && (!opts || !opts.method || opts.method === 'GET')) {
+        return jsonRes({ ok: true, favs: favsServer.slice() })
+      }
+      if (u === '/dsh-music/radio/favs' && opts && opts.method === 'POST') {
+        const b = JSON.parse(opts.body || '{}')
+        const key = (s) => String((s && (s.id || s.stationuuid)) || '') || String((s && s.url) || '')
+        if (b.action === 'remove') favsServer = favsServer.filter((f) => key(f) !== key(b.station))
+        else if (!favsServer.some((f) => key(f) === key(b.station))) favsServer = [b.station, ...favsServer]
+        return jsonRes({ ok: true, faved: b.action !== 'remove', favs: favsServer.slice() })
+      }
+      return baseFetch(url, opts)
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+
+    // 电台在播（radio intent）
+    intent = { action: 'play', kind: 'radio', id: 'r1', name: 'China Plus', radioUrl: 'https://radio.example/live.mp3', codec: 'MP3', bitrate: 128, source: 'radio', hls: false }
+    await act(async () => { await intentPoll() })
+    await tick(); await tick()
+    expect(audio.src).toContain('/dsh-music/radio/play?u=')
+    act(() => { audio.emit('play') })
+
+    // 播放条出现爱心按钮（电台不再隐藏）
+    let heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart).toBeTruthy()
+    expect(heart.className).not.toContain(' on') // 初始未收藏
+
+    // 点击爱心 → 收藏（POST /radio/favs add）→ 点亮
+    act(() => { heart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick(); await tick()
+    heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart.className).toContain('on') // 收藏后点亮
+    expect(favsServer.length).toBe(1)
+    expect(favsServer[0].name).toBe('China Plus')
+
+    // 再点爱心 → 取消收藏 → 熄灭
+    act(() => { heart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick(); await tick()
+    heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart.className).not.toContain('on')
+    expect(favsServer.length).toBe(0)
+  })
+
   it('电台播放失败自动退避重试（再点就好场景：首次 error 后自动重拉，不立即报错）', async () => {
     // 回归：AsiaFM高清音乐台等裸 AAC(aacp) 台在 Chromium 偶发解码失败（再点就好）。
     // radio onError 应自动退避重试（≤RADIO_RETRY_MAX 次），首次失败不弹「电台播放失败」。
@@ -923,19 +1002,18 @@ describe('dsh-music-player client render smoke', () => {
 
     const rows = [...container.querySelectorAll('.dsh-music-qq-station')]
     expect(rows.length).toBeGreaterThanOrEqual(3) // 首屏 50（含合成行），fixture 3 个命名台必在
-    // 纯流台可播：点行（info 区）→ startRadioPlayback
+    // 纯流台可播：点整行（.dsh-music-track 主体）→ startRadioPlayback
     const bjRow = rows.find((r) => r.textContent.includes('北京新闻广播'))
-    act(() => { bjRow.querySelector('.dsh-music-qq-station-info').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    act(() => { bjRow.querySelector('.dsh-music-track').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(audios[0].src).toContain('/dsh-music/radio/play?u=')
 
-    // HLS 台：可播（不再灰显/禁播），显示「HLS」徽章；点行 → startRadioPlayback 且 URL 带 hls=1
+    // HLS 台：可播（不再灰显/禁播），显示「HLS」徽章；点整行 → startRadioPlayback 且 URL 带 hls=1
     const ifengRow = rows.find((r) => r.textContent.includes('凤凰卫视资讯台'))
     expect(ifengRow.className).not.toContain('hls-only')
     expect(ifengRow.querySelector('.dsh-music-qq-station-tag.hls')).toBeTruthy() // HLS 徽章
-    const playBtn = ifengRow.querySelector('.dsh-music-qq-station-play')
-    expect(playBtn.disabled).toBe(false)
-    act(() => { ifengRow.querySelector('.dsh-music-qq-station-info').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(ifengRow.querySelector('.dsh-music-track')).toBeTruthy() // 整行可点主体存在
+    act(() => { ifengRow.querySelector('.dsh-music-track').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const ifengAudio = audios.find((a) => a.src && a.src.includes('/dsh-music/radio/play'))
     expect(ifengAudio).toBeTruthy() // HLS 台同样触发播放
@@ -946,7 +1024,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(srcBadge.textContent).toContain('电台')
     expect(srcBadge.textContent).toContain('HLS')
     expect(srcBadge.textContent).not.toContain('UNKNOWN')
-    // 收藏钮仍可用
+    // 收藏钮仍可用（行尾独立按钮，stopPropagation 不影响整行点播）
     const favBtn = ifengRow.querySelector('.dsh-music-qq-station-fav')
     expect(favBtn).toBeTruthy()
   })
