@@ -1,6 +1,6 @@
 {
   "name": "dsh-music-player",
-  "version": "0.8.1",
+  "version": "1.0.0",
   "description": "Vibe coding时的好伴侣",
   "type": "module",
   "main": "lib/index.js",
