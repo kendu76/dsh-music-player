@@ -33,7 +33,7 @@ DeepSeek Harness 音乐/小说播放插件。
 |:---:|:---:|
 | ![播放本地音乐](assets/screenshot-bar.png) | ![播放QQ音乐](assets/screenshot-qq.png) |
 | 播放酷狗音乐 | AI讲书 |
-| ![播放酷狗音乐](assets/screenshot-kg.png) | ![播放AI讲书](assets/screenshot-spectrum.png) |
+| ![播放酷狗音乐](assets/screenshot-kg.png) | ![播放AI讲书](assets/screenshot-novel.png) |
 | QQ音乐面板 | 酷狗音乐面板 |
 | ![播放面板1](assets/screenshot-panel-qq.png) | ![播放面板2](assets/screenshot-panel-kg.png) |
 
