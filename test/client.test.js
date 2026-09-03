@@ -912,6 +912,129 @@ describe('dsh-music-player client render smoke', () => {
     expect(bodyText).not.toContain('电台播放失败')
   })
 
+  it('电台 tab：中文电台目录首屏失败自动重试后恢复（不永远卡在加载中）', async () => {
+    // 回归：/radio/cn 偶发失败（上游镜像全部瞬时不可达）曾让目录视图永远停在
+    // 「加载中…」——现在首屏失败自动退避重试 2 次，恢复后正常渲染列表。
+    let cnFails = 2 // 前 2 次 /radio/cn 返回失败（首拉 + 第 1 次重试），第 3 次成功
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', (url, opts) => {
+      const u = String(url)
+      if (u.includes('/dsh-music/radio/cn') && cnFails > 0) {
+        cnFails--
+        return Promise.resolve(jsonRes({ ok: false, error: 'fetch failed' }))
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory } }
+    const ctx = { get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() }
+    modExports.apply(ctx)
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 网络电台 → 「中文电台」视图
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const cnTab = await waitForText(container, '.dsh-music-qq-viewtab', '中文电台')
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // 前两次失败（含 0.6s/1.2s 退避）后第 3 次成功 → 目录正常渲染，不卡「加载中…」
+    let cnLoaded = false
+    for (let i = 0; i < 40 && !cnLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      cnLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))
+    }
+    expect(cnLoaded).toBe(true)
+    expect(cnFails).toBe(0) // 3 次请求都发过（首拉 + 2 次重试中的前 2 次失败已被消费）
+    // 无「加载失败」残留文案
+    expect(container.textContent).not.toContain('中文电台加载失败')
+  })
+
+  it('电台 tab：中文电台目录重试耗尽显示「加载失败 + 重试」，点重试恢复列表', async () => {
+    // 回归：目录源持续失败时曾永远停在「加载中…」。现在自动重试 2 次后给出
+    // 明确失败态 + 手动「重试」按钮；点重试成功即恢复列表。
+    let failAll = true // 一直失败，直到点「重试」后翻转为成功
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', (url, opts) => {
+      const u = String(url)
+      if (u.includes('/dsh-music/radio/cn') && failAll) {
+        return Promise.resolve(jsonRes({ ok: false, error: 'fetch failed' }))
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory } }
+    const ctx = { get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() }
+    modExports.apply(ctx)
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 网络电台 → 「中文电台」视图（持续失败）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const cnTab = await waitForText(container, '.dsh-music-qq-viewtab', '中文电台')
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // 等首拉 + 2 次退避重试（0.6s + 1.2s）耗尽 → 失败态 + 「重试」按钮出现
+    let failVisible = false
+    for (let i = 0; i < 50 && !failVisible; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      failVisible = [...container.querySelectorAll('.dsh-music-empty')].some((b) => (b.textContent || '').includes('中文电台加载失败'))
+    }
+    expect(failVisible).toBe(true)
+    const retryBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '重试')
+    expect(retryBtn).toBeTruthy()
+
+    // 翻转 stub 为成功，点「重试」→ 列表恢复
+    failAll = false
+    act(() => { retryBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    let cnLoaded = false
+    for (let i = 0; i < 30 && !cnLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      cnLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))
+    }
+    expect(cnLoaded).toBe(true)
+    expect(container.textContent).not.toContain('中文电台加载失败')
+  })
+
   it('电台 tab：切到「搜索」视图不显示热门电台残留（搜索引导态）', async () => {
     // 回归：search 视图曾直接渲染热门 rows（数据串台）。现在搜索视图有独立
     // searchResults（null=未搜），切过去应显示引导提示而非热门列表。
