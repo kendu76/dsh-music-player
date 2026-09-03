@@ -437,6 +437,36 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts Radio-related prefs (radio-playback / radio-history) through the allowlist (persistence regression)', async () => {
+    // 回归：网络电台「当前台」+搜索历史曾漏出 Host 白名单，POST 被 sanitizePrefs 静默
+    // 丢弃 → 播电台时刷新页面，Host prefs 里没有电台记录，restoreLatest 找不到
+    // radioTs=-1，回退恢复成旧的酷狗/QQ 记录（用户实测：播电台刷新后播放条显示酷狗歌）。
+    // radio-playback / radio-history 必须能存、能 GET 回读——否则电台播放数据不落盘。
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-radio-playback': JSON.stringify({ station: { id: 'cn1', stationuuid: 'cn1', name: '北京新闻广播', url: 'https://radio.example/bj.mp3', codec: 'MP3', bitrate: 64, hls: false, country: 'China', countrycode: 'CN', lastcheckok: true }, ts: 1234567890 }),
+          'dsh-music-radio-history': JSON.stringify(['中国之声', '北京新闻广播']),
+        } }) }),
+        res,
+      )
+      const d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      const saved = JSON.parse(d.prefs['dsh-music-radio-playback'])
+      expect(saved.station.id).toBe('cn1')
+      expect(saved.station.name).toBe('北京新闻广播')
+      expect(JSON.parse(d.prefs['dsh-music-radio-history'])).toContain('中国之声')
+      // GET 回读：快照里确实持久化了电台记录
+      const g = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/prefs' }), g)
+      const gd = JSON.parse(g.body)
+      expect(JSON.parse(gd.prefs['dsh-music-radio-playback']).station.name).toBe('北京新闻广播')
+      expect(JSON.parse(gd.prefs['dsh-music-radio-history'])).toContain('北京新闻广播')
+    } finally { cleanup() }
+  })
+
   it('nc 写路由（create/delete/add/remove）未登录返回 401、缺参返回 400（不发外部请求）', async () => {
     // 网易云自建歌单写操作路由：与 playlist-collect 同门禁——未登录（无 cookie 文件）
     // 必须 401 且绝不发外部网络请求；参数不合法必须 400。

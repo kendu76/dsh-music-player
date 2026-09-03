@@ -220,6 +220,61 @@ async function fetchStub(url, opts) {
   }
   if (u === '/dsh-music/intent') return jsonRes(null)
   if (u === '/dsh-music/qq/status') return jsonRes({ loggedIn: qqLoggedIn, uin: qqLoggedIn ? '123456' : '' })
+  // 网络电台目录分页 stub：每组合成 120 行，首页 0..49 含既有夹具名（北京新闻广播/
+  // 热门台A 等），offset 翻页取后续（用于「加载更多」测试）。hls 混入若干供灰显测试。
+  function radioDirRows(kind, group, offset) {
+    const off = offset || 0
+    const size = 120
+    const rows = []
+    for (let i = 0; i < size; i++) {
+      if (kind === 'cn' && group === 'music') {
+        if (i === 0) rows.push({ id: 'cm1', stationuuid: 'cm1', name: '中文音乐台甲', url: 'https://radio.example/cm1.mp3', codec: 'MP3', bitrate: 128, hls: false, country: 'China', countrycode: 'CN', lastcheckok: true })
+        else if (i === 1) rows.push({ id: 'cm2', stationuuid: 'cm2', name: '中文音乐台乙', url: 'https://radio.example/cm2.mp3', codec: 'MP3', bitrate: 0, hls: false, country: 'China', lastcheckok: true })
+        else rows.push({ id: 'cnx' + i, stationuuid: 'cnx' + i, name: '中文音乐台' + (i + 1), url: 'https://radio.example/cnm' + i + '.mp3', codec: 'MP3', bitrate: 64, hls: (i % 10 === 0), country: 'China', countrycode: 'CN', lastcheckok: true })
+        continue
+      }
+      if (kind === 'cn') {
+        if (i === 0) rows.push({ id: 'cn1', stationuuid: 'cn1', name: '北京新闻广播', url: 'https://radio.example/bj.mp3', codec: 'MP3', bitrate: 64, hls: false, country: 'China', countrycode: 'CN', language: 'chinese', lastcheckok: true })
+        else if (i === 1) rows.push({ id: 'cn2', stationuuid: 'cn2', name: '上海新闻广播', url: 'https://radio.example/sh.mp3', codec: 'MP3', bitrate: 64, hls: false, country: 'China', lastcheckok: true })
+        else if (i === 2) rows.push({ id: 'cn3', stationuuid: 'cn3', name: '凤凰卫视资讯台', url: 'https://radio.example/ifeng.m3u8', codec: 'UNKNOWN', bitrate: 0, hls: true, country: 'China', lastcheckok: true })
+        else rows.push({ id: 'cnx' + i, stationuuid: 'cnx' + i, name: '中文电台' + (i + 1), url: 'https://radio.example/cn' + i + '.mp3', codec: 'MP3', bitrate: 64, hls: (i % 10 === 0), country: 'China', countrycode: 'CN', lastcheckok: true })
+      } else {
+        if (i === 0) rows.push({ id: 'top1', stationuuid: 'top1', name: '热门台A', url: 'https://radio.example/top1.mp3', codec: 'MP3', bitrate: 96, hls: false, country: 'China', lastcheckok: true })
+        else if (i === 1) rows.push({ id: 'top2', stationuuid: 'top2', name: '热门台B', url: 'https://radio.example/top2.mp3', codec: 'AAC', bitrate: 0, hls: false, country: 'USA', lastcheckok: true })
+        else rows.push({ id: 'topx' + i, stationuuid: 'topx' + i, name: '全球热门' + (i + 1), url: 'https://radio.example/top' + i + '.mp3', codec: 'MP3', bitrate: 128, hls: false, country: i % 3 === 0 ? 'China' : 'USA', lastcheckok: true })
+      }
+    }
+    return rows.slice(off, off + 50)
+  }
+  if (u.includes('/dsh-music/radio/top')) {
+    radioTopFetches++
+    const qp = (() => { try { return new URL('http://x' + u).searchParams } catch { return new URLSearchParams() } })()
+    const group = qp.get('group') || 'all'
+    const offset = parseInt(qp.get('offset') || '0', 10) || 0
+    return jsonRes({ ok: true, stations: radioDirRows('top', group, offset) })
+  }
+  if (u.includes('/dsh-music/radio/cn')) {
+    radioCnFetches++
+    const qp = (() => { try { return new URL('http://x' + u).searchParams } catch { return new URLSearchParams() } })()
+    const group = qp.get('group') || 'all'
+    const offset = parseInt(qp.get('offset') || '0', 10) || 0
+    return jsonRes({ ok: true, stations: radioDirRows('cn', group, offset) })
+  }
+  if (u === '/dsh-music/radio/favs' || u === '/dsh-music/radio/recent') {
+    return jsonRes({ ok: true, favs: [], recent: [] })
+  }
+  if (u.includes('/dsh-music/radio/search')) {
+    return jsonRes({ ok: true, stations: [
+      { id: 'r1', stationuuid: 'r1', name: 'China Plus', url: 'https://radio.example/live.mp3', codec: 'MP3', bitrate: 128, hls: false, country: 'China', countrycode: 'CN', language: 'english', lastcheckok: true },
+      { id: 'r2', stationuuid: 'r2', name: '央广中国之声', url: 'https://radio.example/cnr.mp3', codec: 'MP3', bitrate: 0, hls: false, country: 'China', lastcheckok: true },
+    ] })
+  }
+  if (u === '/dsh-music/radio/favs' && o && o.method === 'POST') {
+    const body = JSON.parse(o.body || '{}')
+    if (body.action === 'remove') return jsonRes({ ok: true, faved: false, favs: [] })
+    return jsonRes({ ok: true, faved: true, favs: [body.station] })
+  }
+  if (u === '/dsh-music/radio/recent' && o && o.method === 'POST') return jsonRes({ ok: true })
   if (u.includes('/dsh-music/qq/search')) {
     return jsonRes({ ok: true, isVip: false, results: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], album: '叶惠美', payplay: 0, source: 'qq' }] })
   }
@@ -292,9 +347,16 @@ async function fetchStub(url, opts) {
   return jsonRes({})
 }
 
+// test hook: counts /dsh-music/radio/top and /radio/cn directory fetches —
+// 热门/中文电台数据在面板会话内只拉一次（切回不重拉，缓存回归断言）。
+let radioTopFetches = 0
+let radioCnFetches = 0
+
 async function bootClient() {
   factory = null
   registered = []
+  radioTopFetches = 0
+  radioCnFetches = 0
   window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
   vi.stubGlobal('Audio', FakeAudio)
   vi.stubGlobal('fetch', fetchStub)
@@ -609,6 +671,503 @@ describe('dsh-music-player client render smoke', () => {
     // is a one-way upgrade source and never keeps the migrated data.
     expect(localStorage.getItem('dsh-music-mode')).toBeNull()
     expect(localStorage.getItem('dsh-music-qq-history')).toBeNull()
+  })
+
+  it('电台 tab：搜索 → 播放 → 收藏（radio-browser 目录交互）', async () => {
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory } }
+    const ctx = { get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() }
+    modExports.apply(ctx)
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 切「电台」tab → 切「搜索」视图
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    expect(radioTab).toBeTruthy()
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = await waitForText(container, '.dsh-music-qq-viewtab', '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+
+    // 搜索「China」→ 出现 station 行
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'China')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = await waitForText(container, '.dsh-music-qq-station-name', 'China Plus')
+    expect(row).toBeTruthy()
+
+    // 点击行 → startRadioPlayback：audio.src 指向同源代理 + scope 置 radio
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const audioEl = audios[0] // 第一个 Audio 实例是主播放元素（第二个是讲书预加载 preAudio）
+    expect(audioEl.src).toContain('/dsh-music/radio/play?u=')
+    // 播放条名称显示电台名
+    expect(container.querySelector('.dsh-music-bar-name-text').textContent).toContain('China Plus')
+
+    // 收藏：点行尾 ♡ → POST /radio/favs（用包装 fetch 捕获请求）
+    let radioFavPost = null
+    const origFetch = global.fetch
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url) === '/dsh-music/radio/favs' && opts && opts.method === 'POST') radioFavPost = opts.body
+      return origFetch(url, opts)
+    })
+    const favBtn = [...container.querySelectorAll('.dsh-music-qq-station-fav')][0]
+    act(() => { favBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(radioFavPost).toBeTruthy()
+    const favedBody = JSON.parse(radioFavPost)
+    expect(favedBody.action).toBe('add')
+    expect(favedBody.station.name).toBe('China Plus')
+
+    // 播放电台后，Host prefs 必须收到 radio-playback（当前台）与 scope=radio——
+    // 否则刷新后没有电台记录可恢复（会回退成别的来源）。
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // 等 debounce flush
+    const radioSaved = JSON.parse(prefsServer['dsh-music-radio-playback'])
+    expect(radioSaved.station.name).toBe('China Plus')
+    expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('radio')
+  })
+
+  it('电台播放失败自动退避重试（再点就好场景：首次 error 后自动重拉，不立即报错）', async () => {
+    // 回归：AsiaFM高清音乐台等裸 AAC(aacp) 台在 Chromium 偶发解码失败（再点就好）。
+    // radio onError 应自动退避重试（≤RADIO_RETRY_MAX 次），首次失败不弹「电台播放失败」。
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this.loadCount = 0 }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+      load() { this.loadCount++; super.load() }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory } }
+    const ctx = { get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() }
+    modExports.apply(ctx)
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 「网络电台」→ 「搜索」→ 搜到电台并播放（搜「China」出 China Plus 纯流台）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = await waitForText(container, '.dsh-music-qq-viewtab', '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, 'China')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    const row = await waitForText(container, '.dsh-music-qq-station-name', 'China Plus')
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    const playing = audios.find((a) => a.src && a.src.includes('/dsh-music/radio/play'))
+    expect(playing).toBeTruthy()
+    const loadBefore = playing.loadCount
+
+    // 触发一次 error（模拟浏览器偶发解码失败）→ 应自动重试而非立即报错
+    act(() => { playing.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 100)) })
+    // 尚未到退避延时，先确认没有立刻弹错误提示
+    const errEl0 = container.querySelector('.dsh-music-bar-error, [class*="error"]')
+    // 等退避（0.6s）+ 重试 load
+    await act(async () => { await new Promise((r) => setTimeout(r, 900)) })
+    // 自动重试 = 主 audio 再次 load 且 src 仍指向该电台
+    expect(playing.loadCount).toBeGreaterThan(loadBefore)
+    // 错误提示不应是「电台播放失败」（自动重试期间 error 被清空）
+    const bodyText = container.textContent
+    expect(bodyText).not.toContain('电台播放失败')
+  })
+
+  it('电台 tab：切到「搜索」视图不显示热门电台残留（搜索引导态）', async () => {
+    // 回归：search 视图曾直接渲染热门 rows（数据串台）。现在搜索视图有独立
+    // searchResults（null=未搜），切过去应显示引导提示而非热门列表。
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 「网络电台」tab（默认我的电台视图）→ 切「热门电台」加载出热门列表
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const topTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '热门电台')
+    act(() => { topTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 等热门目录异步加载完成（多轮 act 提交，避免 waitForText 无 act 包裹不触发渲染）
+    let topVisible = false
+    for (let i = 0; i < 20 && !topVisible; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+      topVisible = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('热门台A'))
+    }
+    expect(topVisible).toBe(true)
+
+    // 切到「搜索」：此刻尚未搜索 → 应显示引导提示，绝不该出现热门台列表
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 120)) })
+    const empties = [...container.querySelectorAll('.dsh-music-empty')].map((e) => e.textContent)
+    const stations = [...container.querySelectorAll('.dsh-music-qq-station-name')].map((e) => e.textContent)
+    expect(empties.some((t) => (t || '').includes('开始搜索'))).toBe(true)
+    expect(stations.some((t) => t.includes('热门台A'))).toBe(false)
+    expect(container.querySelector('.dsh-music-qq-input')).toBeTruthy()
+  })
+
+  it('电台 tab：中文电台视图实时加载 CN 目录，纯流可播、HLS 台灰显不可播', async () => {
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory } }
+    const ctx = { get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() }
+    modExports.apply(ctx)
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 电台 tab → 「中文电台」
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const cnTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '中文电台')
+    expect(cnTab).toBeTruthy()
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // 等 CN 目录异步加载完成：北京新闻广播（纯流）+ 凤凰卫视资讯台（HLS 灰显）都出现
+    let cnLoaded = false
+    for (let i = 0; i < 20 && !cnLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+      cnLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))
+    }
+    expect(cnLoaded).toBe(true)
+
+    const rows = [...container.querySelectorAll('.dsh-music-qq-station')]
+    expect(rows.length).toBeGreaterThanOrEqual(3) // 首屏 50（含合成行），fixture 3 个命名台必在
+    // 纯流台可播：点行（info 区）→ startRadioPlayback
+    const bjRow = rows.find((r) => r.textContent.includes('北京新闻广播'))
+    act(() => { bjRow.querySelector('.dsh-music-qq-station-info').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audios[0].src).toContain('/dsh-music/radio/play?u=')
+
+    // HLS 台：可播（不再灰显/禁播），显示「HLS」徽章；点行 → startRadioPlayback 且 URL 带 hls=1
+    const ifengRow = rows.find((r) => r.textContent.includes('凤凰卫视资讯台'))
+    expect(ifengRow.className).not.toContain('hls-only')
+    expect(ifengRow.querySelector('.dsh-music-qq-station-tag.hls')).toBeTruthy() // HLS 徽章
+    const playBtn = ifengRow.querySelector('.dsh-music-qq-station-play')
+    expect(playBtn.disabled).toBe(false)
+    act(() => { ifengRow.querySelector('.dsh-music-qq-station-info').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const ifengAudio = audios.find((a) => a.src && a.src.includes('/dsh-music/radio/play'))
+    expect(ifengAudio).toBeTruthy() // HLS 台同样触发播放
+    expect(ifengAudio.src).toContain('hls=1') // 播放 URL 带 hls 标记（Host 走转流）
+    // 音质徽章：HLS 台显示「电台 · HLS」，不再显示 UNKNOWN（codec=UNKNOWN 但 hls=true）
+    const srcBadge = container.querySelector('.dsh-music-bar-src')
+    expect(srcBadge).toBeTruthy()
+    expect(srcBadge.textContent).toContain('电台')
+    expect(srcBadge.textContent).toContain('HLS')
+    expect(srcBadge.textContent).not.toContain('UNKNOWN')
+    // 收藏钮仍可用
+    const favBtn = ifengRow.querySelector('.dsh-music-qq-station-fav')
+    expect(favBtn).toBeTruthy()
+  })
+
+  it('中文电台：分组 pill 行展示，切「音乐」组只拉该组数据并渲染', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    radioCnFetches = 0
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 网络电台 → 「中文电台」视图
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const cnTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '中文电台')
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 等「全部」组加载（默认分组 = all）
+    let cnLoaded = false
+    for (let i = 0; i < 20 && !cnLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      cnLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))
+    }
+    expect(cnLoaded).toBe(true)
+    expect(radioCnFetches).toBe(1)
+
+    // 分组 pill 行存在（中文电台：全部/新闻/音乐/交通/财经/文艺/故事/体育）
+    const cats = [...container.querySelectorAll('.dsh-music-qq-cat')].map((b) => b.textContent)
+    expect(cats).toEqual(['全部', '新闻', '音乐', '交通', '财经', '文艺', '故事', '体育'])
+    // 「全部」当前激活
+    expect(container.querySelector('.dsh-music-qq-cat.active').textContent).toBe('全部')
+
+    // 切「音乐」组 → 只拉 /radio/cn?group=music 数据（stub 返回中文音乐台甲/乙）
+    const musicCat = [...container.querySelectorAll('.dsh-music-qq-cat')].find((b) => b.textContent === '音乐')
+    act(() => { musicCat.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    let musicLoaded = false
+    for (let i = 0; i < 20 && !musicLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      musicLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文音乐台甲'))
+    }
+    expect(musicLoaded).toBe(true)
+    expect(radioCnFetches).toBe(2) // all(1) + music(1)
+    // 激活态切换到「音乐」；不再显示北京新闻广播（那是 all 组数据）
+    expect(container.querySelector('.dsh-music-qq-cat.active').textContent).toBe('音乐')
+    expect([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))).toBe(false)
+
+    // 切回「全部」：缓存命中不重拉，直接显示
+    const allCat = [...container.querySelectorAll('.dsh-music-qq-cat')].find((b) => b.textContent === '全部')
+    act(() => { allCat.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
+    expect(radioCnFetches).toBe(2)
+    expect([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))).toBe(true)
+  })
+
+  it('网络电台：中文/热门列表先加载 50 条，点「加载更多」再追加下一页', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    radioTopFetches = 0; radioCnFetches = 0
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 网络电台 → 中文电台（默认全部组）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const cnTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '中文电台')
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 等首屏 50 条加载完成（合成行「中文电台51」在第 51..100 页，不在首页）
+    let loaded = false
+    for (let i = 0; i < 20 && !loaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      loaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文电台1'))
+    }
+    expect(loaded).toBe(true)
+    // 首屏 50 条：能看到首页第 50 个合成台（中文电台50? 首页 i=49 → 中文电台50），
+    // 看不到第 51 个（中文电台51，属于 offset=50 页）
+    const names1 = [...container.querySelectorAll('.dsh-music-qq-station-name')].map((b) => b.textContent)
+    // 首页 0..49：0/1/2 是命名台（北京/上海/凤凰），3..49 为合成台（47 个，中文电台4..中文电台50）
+    expect(names1.filter((n) => n.startsWith('中文电台')).length).toBe(47)
+    expect(names1.some((n) => n.includes('中文电台50'))).toBe(true)
+    expect(names1.some((n) => n.includes('中文电台51'))).toBe(false)
+    expect(radioCnFetches).toBe(1)
+    // 「加载更多」按钮出现
+    let moreBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '加载更多')
+    expect(moreBtn).toBeTruthy()
+
+    // 点「加载更多」→ 追加 offset=50 页（中文电台51..100）
+    act(() => { moreBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    let secondLoaded = false
+    for (let i = 0; i < 20 && !secondLoaded; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      secondLoaded = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文电台51'))
+    }
+    expect(secondLoaded).toBe(true)
+    expect(radioCnFetches).toBe(2) // 首页 + 第二页
+    // 0..99 行：3 命名台 + 97 合成台（i=3..99，名 中文电台4..中文电台100）
+    const names2 = [...container.querySelectorAll('.dsh-music-qq-station-name')].map((b) => b.textContent)
+    expect(names2.filter((n) => n.startsWith('中文电台')).length).toBe(97)
+    expect(names2.some((n) => n.includes('北京新闻广播'))).toBe(true)
+    // 仍可继续加载（120 未到底）：按钮还在
+    moreBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '加载更多')
+    expect(moreBtn).toBeTruthy()
+  })
+
+  it('网络电台：热门/中文电台列表首次进入拉取一次，切走再切回不再重新请求（缓存）', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    radioTopFetches = 0; radioCnFetches = 0
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 打开面板 → 网络电台 tab（默认「我的电台」）→ 切「热门电台」首次加载一次
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+    act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const topTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '热门电台')
+    act(() => { topTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 等热门加载出
+    let topVisible = false
+    for (let i = 0; i < 20 && !topVisible; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      topVisible = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('热门台A'))
+    }
+    expect(topVisible).toBe(true)
+    expect(radioTopFetches).toBe(1)
+
+    // 切中文电台（拉一次 cn）
+    const cnTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '中文电台')
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    let cnVisible = false
+    for (let i = 0; i < 20 && !cnVisible; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+      cnVisible = [...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))
+    }
+    expect(cnVisible).toBe(true)
+    expect(radioCnFetches).toBe(1)
+
+    // 热门 → 中文来回切：不再新增目录请求（缓存命中）
+    act(() => { topTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
+    expect(radioTopFetches).toBe(1)
+    act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
+    expect(radioCnFetches).toBe(1)
+    // 中文列表仍显示（缓存内容直接渲染，无需 loading）
+    expect([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('北京新闻广播'))).toBe(true)
+  })
+
+  it('网络电台：重启后恢复当前台到播放条', async () => {
+    // 模拟重启：Host prefs 里躺着一条电台播放记录。新会话必须恢复同一电台，
+    // 播放条显示台名（暂停态），点 ▶ 重新拉流播放。
+    // （配套 Host 白名单回归见 index.test.js：radio-playback/radio-history 必须
+    // 能落盘——曾漏出 PREF_ALLOW 被 sanitizePrefs 静默丢弃，刷新后无电台记录可恢复。）
+    prefsServer = {
+      'dsh-music-radio-playback': JSON.stringify({
+        station: {
+          id: 'cn1', stationuuid: 'cn1', name: '北京新闻广播',
+          url: 'https://radio.example/bj.mp3', codec: 'MP3', bitrate: 64,
+          hls: false, country: 'China', countrycode: 'CN', lastcheckok: true,
+        },
+        ts: 999999999,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'radio' }),
+    }
+    const audios = []
+    class RAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', RAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+
+    // restoreRadioPlayback ran during loadTracks: bar shows the radio station (paused)
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('北京新闻广播')
+    // 点 ▶ → togglePlay 重新挂电台流
+    const playBtn = [...container.querySelectorAll('.dsh-music-bar-btn')].find((b) => b.title === '播放/暂停')
+    expect(playBtn).toBeTruthy()
+    act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audios[0].src).toContain('/dsh-music/radio/play?u=')
   })
 
   it('never writes new data to the browser store (Host-only persistence)', async () => {
@@ -10141,6 +10700,77 @@ describe('news pane（新闻播报页签）', () => {
     // 歌词重载：音乐起播 1 次 + 新闻播完续播再加载 1 次（stop 清 lyricTrackId 后守卫放行）
     await tick()
     expect(lyricFetches.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('新闻播完自动切回被打断的网络电台（直播流重新拉流续播）', async () => {
+    // 场景：电台播放中 → 定时任务新闻自动播报（intent）→ 新闻自然播完 → 回到电台继续播。
+    // 回归：snapshotNewsResume 曾漏掉 radio: 前缀，电台被当成 music → 恢复成本地音乐。
+    bookTextFixture = '新闻块字幕。'
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [], tracks: [
+      { id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' },
+    ], count: 1 }
+    prefsServer = {}
+    const audios = []
+    class RAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/intent') return jsonRes(intent)
+      return baseFetch(url, opts)
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', RAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+
+    // (1) 电台在播：radio intent（China Plus 纯流台）
+    intent = { action: 'play', kind: 'radio', id: 'r1', name: 'China Plus', radioUrl: 'https://radio.example/live.mp3', codec: 'MP3', bitrate: 128, source: 'radio', hls: false }
+    await act(async () => { await intentPoll() })
+    await tick()
+    expect(audio.src).toContain('/dsh-music/radio/play?u=')
+    act(() => { audio.emit('play') })
+
+    // (2) 定时任务新闻自动播报打断电台 → 虚拟书管线接管
+    intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+    await act(async () => { await intentPoll() })
+    await tick(); await tick()
+    expect(audio.src).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    act(() => { audio.emit('play') })
+
+    // (3) 新闻 4 块逐块 ended → 自然播完触发恢复
+    for (let i = 0; i < 4; i++) {
+      act(() => { audio.emit('ended') })
+      await tick(); await tick()
+    }
+
+    // (4) 断言：切回电台（/radio/play），而不是本地音乐 /dsh-music/0，也不是 news
+    expect(audio.src).toContain('/dsh-music/radio/play?u=')
+    expect(audio.src).not.toContain('/dsh-music/news/')
+    expect(audio.src).not.toContain('/dsh-music/0')
   })
 
   it('新闻期次播放时显示字幕（走 /dsh-music/news/<id>/text 而非 /dsh-music/book/）', async () => {
