@@ -3957,11 +3957,105 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(audio.src).toContain('from=1')
     // 预取无数据 → 非静默：播放条应显示「AI 合成中…」缓冲提示（而不是无声卡住）
-    expect(container.querySelector('.dsh-music-bar-buffering')).toBeTruthy()
+    const bufEl = container.querySelector('.dsh-music-bar-buffering')
+    expect(bufEl).toBeTruthy()
+    // 秒数必须从 ≈0 起步、绝不闪现荒谬的大数/负数（BookStatus 的 now 在 interval
+    // 重启首帧须立即同步——否则会用冻结的旧 now 算出「合成中…300s」一帧再跳回 1s）。
+    const m = /AI 合成中…\s*(\d+)s/.exec(bufEl.textContent || '')
+    expect(m).toBeTruthy()
+    expect(Number(m[1])).toBeLessThan(60) // 首帧即真实差（秒级），不可能是分钟级
     // TTS 终于返回、开始播放 → 缓冲提示清除
     audio.resolvePlay()
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
+    bookTextFixture = ''
+  })
+
+  it('does not flash a stale multi-minute counter when synthesis restarts after idle (BookStatus now sync)', async () => {
+    // Regression: BookStatus 的 now state 只在挂载/interval tick 时更新。合成结束后
+    // bookBuffering=false → interval 停、now 冻结；闲置数分钟后再次播放（bookBuffering
+    // 重新翻 true、bookBufferingSince 置为当下）时，若 interval 首帧仍用冻结的旧 now，
+    // secs = 旧now - 新since 会算出荒谬的分钟级/负值——表现「合成中…300s」闪一帧后
+    // 跳回「合成中…1s」。修复：effect 启动 interval 前先 setNow(Date.now()) 同步基准，
+    // 并对秒数做 ≥0 下限保护。
+    const audios = []
+    class StaleNowAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this._resolvePlay = null }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+      play() {
+        this.paused = false
+        this._playPromise = new Promise((res) => { this._resolvePlay = res })
+        return this._playPromise
+      }
+      resolvePlay() { if (this._resolvePlay) { const r = this._resolvePlay; this._resolvePlay = null; r() } }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '陈旧计时测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 100, 200, 300]
+    bookTextFixture = '陈旧计时测试文本。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '陈旧计时测试.txt': { from: 2, base: 400, pos: 3, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', StaleNowAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    // setInterval 真实注册（fake timers 控制 tick），让 BookStatus 的 now 可前进
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const realDateNow = Date.now
+    vi.useFakeTimers()
+    try {
+      // 第一次续播播放：BookStatus 挂载（now 取此刻），▶ 后进入合成中
+      act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve() })
+      let bufEl = container.querySelector('.dsh-music-bar-buffering')
+      expect(bufEl).toBeTruthy()
+      const m0 = /AI 合成中…\s*(-?\d+)s/.exec(bufEl.textContent || '')
+      expect(m0).toBeTruthy()
+      expect(Math.abs(Number(m0[1]))).toBeLessThan(60) // 从 ≈0 起步，无荒谬大数
+      // interval tick 后秒数随系统时间正常增长（now 不被冻结在旧值）
+      act(() => { vi.advanceTimersByTime(2000) })
+      const m1 = /AI 合成中…\s*(-?\d+)s/.exec(bufEl.textContent || '')
+      expect(m1).toBeTruthy()
+      expect(Number(m1[1])).toBeGreaterThanOrEqual(0)
+      expect(Number(m1[1])).toBeLessThan(60)
+      // 停住：合成结束、bookBuffering=false（interval 清理、now 停留在最后 tick）
+      audio.resolvePlay()
+      await act(async () => { await Promise.resolve() })
+      expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
+      // 模拟闲置 300s 后再次合成：bookBufferingSince 置为新的系统时间。
+      // 修复前：BookStatus 重启 interval 的首帧若用冻结的旧 now，会算出
+      // 荒谬的分钟级差值；修复后首帧即 setNow 同步 → 小秒数（≤2s 内）。
+      act(() => { vi.setSystemTime(realDateNow() + 300000) })
+      audio.paused = true
+      act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve() })
+      bufEl = container.querySelector('.dsh-music-bar-buffering')
+      expect(bufEl).toBeTruthy()
+      const m2 = /AI 合成中…\s*(-?\d+)s/.exec(bufEl.textContent || '')
+      expect(m2).toBeTruthy()
+      // 关键断言：绝不显示 300s 这类冻结旧 now 造成的分钟级大数
+      expect(Math.abs(Number(m2[1]))).toBeLessThan(60)
+    } finally {
+      vi.useRealTimers()
+    }
     bookTextFixture = ''
   })
 
