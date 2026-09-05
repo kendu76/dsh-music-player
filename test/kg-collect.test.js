@@ -88,9 +88,8 @@ function boot() {
 
 let booted
 beforeEach(() => {
-  // 生产端 12h 主动续命处于【临时观察·屏蔽】状态（默认关），本文件测的就是
-  // 续命/被动补救路径：显式开回来，逻辑本身保持有测试看护。
-  process.env.DSH_KG_PROACTIVE_REFRESH = 'on'
+  // 主动续命默认开启（KG_REFRESH_TTL = 24h），生产与测试一致；本文件覆盖
+  // 续命触发/在途去重/失效登出路径。
   booted = boot()
   writeFileSync(booted.cookieFile, JSON.stringify({
     session: {
@@ -114,8 +113,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   vi.clearAllMocks()
-  delete process.env.DSH_KG_PROACTIVE_REFRESH
-  if (booted) booted.cleanup()
+  booted.cleanup()
 })
 
 describe('酷狗收藏歌单：走 get_other_list_file_nofilt（creatorGid）读歌', () => {
@@ -190,10 +188,11 @@ describe('酷狗「我喜欢」集合接口（/dsh-music/kg/liked，供播放条
   })
 })
 
-describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自动登出 + kgLoginDead 标记', () => {
-  it('业务接口报设备不匹配、刷新也报设备不匹配：清空会话并返回 kgLoginDead:true', async () => {
+describe('酷狗登录态失效 → 不做被动补救，直接登出 + kgLoginDead 标记', () => {
+  it('业务接口报设备不匹配（20017）→ 不刷新补救，清空会话并返回 kgLoginDead:true', async () => {
+    // 被动补救已移除：token 失效由「请求前主动续命（24h TTL）」预防；若业务仍报
+    // 设备不匹配，说明会话确实死了，直接登出让前端跳回扫码页，不再现场刷新重试。
     vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))
-    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
     expect(res.status).toBe(502)
@@ -201,7 +200,8 @@ describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自
     expect(d.ok).toBe(false)
     expect(d.kgLoginDead).toBe(true)
     expect(d.error).toContain('请重新扫码登录')
-    expect(KG.refreshSession).toHaveBeenCalled()
+    expect(KG.refreshSession).not.toHaveBeenCalled() // 无被动补救刷新
+    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1) // 原请求只发一次
     // 会话已自动清空：cookie 文件 loggedIn:false，token 置空；但设备指纹（guid/mid/
     // dfid）保留——重扫以「老设备」身份回归，酷狗风控更友好。
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
@@ -212,38 +212,33 @@ describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自
     expect(saved.session.dfid).toBe('DFID')
   })
 
-  it('刷新成功（会话可续命）→ 重试原接口，不登出、不带标记', async () => {
-    vi.mocked(KG.getMyPlaylists)
-      .mockRejectedValueOnce(new Error('云歌单：登录态与设备不匹配（20017）'))
-      .mockResolvedValueOnce([
-        { id: '2', name: '我喜欢', kind: 'own', isLike: true, isDef: 2, trackCount: 44, cover: '' },
-        { id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 2, cover: '' },
-      ])
-    vi.mocked(KG.refreshSession).mockResolvedValue({ token: 'tok2', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
+  it('业务接口报 20028（临时安全验证）→ 不登出、不带标记（登录态保留，稍后重试）', async () => {
+    // 回归：20028「本次请求需要验证」是临时风控，不是 token 失效/设备不匹配。
+    // 曾因误归入 KG_AUTH_DEAD_RE 导致播放中一次风控抖动就把用户登出（clearKGCookie）。
+    vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('触发酷狗安全验证，请稍后重试（20028）'))
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(502)
     const d = JSON.parse(res.body)
-    expect(d.ok).toBe(true)
-    expect(d.kgLoginDead).toBeUndefined()
-    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(2) // 首次失败 + 刷新后重试
-    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
+    expect(d.kgLoginDead).toBeUndefined() // 20028 不触发登出
+    expect(d.error).toContain('安全验证')
+    expect(KG.refreshSession).not.toHaveBeenCalled()
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.loggedIn).toBe(true) // 未登出
-    expect(saved.session.token).toBe('tok2') // 新 token 已落盘
+    expect(saved.loggedIn).toBe(true) // 登录态保留
+    expect(saved.session.token).toBe('tok') // beforeEach 的 token 未被动过
   })
 
-  it('刷新失败但非设备不匹配（如瞬时网络错）→ 不登出、不带标记', async () => {
-    vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))
-    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：网络超时'))
+  it('业务错误非设备不匹配（如接口 4xx/网络类）→ 不登出、不带标记，原样报错', async () => {
+    vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('获取我的歌单失败：error_code=30020（HTTP 502）'))
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
     expect(res.status).toBe(502)
     const d = JSON.parse(res.body)
     expect(d.kgLoginDead).toBeUndefined()
-    expect(d.error).toContain('网络超时')
+    expect(d.error).toContain('30020')
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.loggedIn).toBe(true) // 未登出
+    expect(KG.refreshSession).not.toHaveBeenCalled()
   })
 })
 
@@ -293,25 +288,25 @@ describe('酷狗登出/失效保留设备指纹（guid/mid/dfid），重扫=老�
   })
 })
 
-describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () => {
-  it('savedAt 超过 12h → 请求前先静默刷新换新 token', async () => {
+describe('酷狗主动续命：token 陈旧时提前静默刷新（>24h）', () => {
+  it('savedAt 超过 24h → 请求前先静默刷新换新 token', async () => {
     writeFileSync(booted.cookieFile, JSON.stringify({
       session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
+      loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000,
     }))
     vi.mocked(KG.refreshSession).mockResolvedValue({ token: 'newtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
     vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
     expect(res.status).toBe(200)
-    // 主动续命在请求前刷新了一次（非失败补救）
+    // 主动续命在请求前刷新了一次
     expect(KG.refreshSession).toHaveBeenCalledTimes(1)
     expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1)
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.session.token).toBe('newtok')
   })
 
-  it('savedAt 新鲜（<12h）→ 不主动刷新，直接请求', async () => {
+  it('savedAt 新鲜（<24h）→ 不主动刷新，直接请求', async () => {
     vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
@@ -322,7 +317,7 @@ describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () 
   it('主动续命遇设备不匹配（token 已死）→ 自动登出 + kgLoginDead，且保留指纹', async () => {
     writeFileSync(booted.cookieFile, JSON.stringify({
       session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
+      loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000,
     }))
     vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
     const res = makeRes()
@@ -337,28 +332,10 @@ describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () 
   })
 })
 
-describe('12h 主动续命屏蔽开关（临时观察期，默认关）', () => {
-  it('未设 DSH_KG_PROACTIVE_REFRESH → savedAt 陈旧也不主动刷新，业务请求照常放行', async () => {
-    delete process.env.DSH_KG_PROACTIVE_REFRESH // 覆盖 beforeEach 的 on：模拟生产屏蔽态
-    writeFileSync(booted.cookieFile, JSON.stringify({
-      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
-    }))
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
-    const res = makeRes()
-    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    expect(res.status).toBe(200)
-    expect(KG.refreshSession).not.toHaveBeenCalled() // 屏蔽中：不发主动续命
-    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1) // token 照常透传给业务请求
-    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.session.token).toBe('oldtok') // 未换新、未落盘
-  })
-})
-
 describe('酷狗主动续命在途去重：并发请求共享一次刷新（防旧 token 二连发被误判已死）', () => {
   const seedStale = () => writeFileSync(booted.cookieFile, JSON.stringify({
     session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-    loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000, // >12h TTL：后续请求都会通过「该刷新」检查
+    loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000, // >24h TTL：后续请求都会通过「该刷新」检查
   }))
   // 可控刷新桩：started 在刷新真正发出时兑现（保证后续请求命中「在途」窗口），resolve/reject 手动放行
   const stallRefresh = () => {

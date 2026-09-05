@@ -2630,6 +2630,54 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
     } finally { restore(); cleanup(); vi.unstubAllGlobals() }
   })
 
+  it('rejects a wav with a long silent stretch in the middle (degenerate TTS output) with a 500', async () => {
+    // Regression（TTS 偶发返回畸形音频）: 结构合法、开头/结尾有语音、但中间夹了
+    // 一段分钟级近零静音的 wav（6-10x 膨胀时长）——浏览器会"播放"静音、字幕爬行。
+    // 静音占比检测须拒绝它，客户端才能显示错误并可点重试（重试重新合成即正常）。
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      // rate=24000 ch=1 bits=16 → 48000 bytes/sec, 24000 samples/sec
+      const voiceSec = Buffer.alloc(48000) // 1 秒语音: 填实际有峰值的数据
+      for (let i = 0; i < voiceSec.length; i += 4) voiceSec.writeInt16LE(12000, i)
+      const silentSec = Buffer.alloc(48000) // 1 秒全零静音
+      // 2s 语音 + 20s 静音 + 2s 语音 = 24s, 语音占比 4/24=17% < 50% → 畸形
+      const data = Buffer.concat([voiceSec, voiceSec, silentSec, silentSec, silentSec, silentSec, silentSec, silentSec,
+        silentSec, silentSec, silentSec, silentSec, silentSec, silentSec, silentSec, silentSec,
+        silentSec, silentSec, silentSec, silentSec, voiceSec, voiceSec])
+      stubTts(pcmWav({ data }))
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('超长静音')
+      // diagnosis recorded with the segment stats
+      const lres = makeRes()
+      await handler(makeReq({ url: '/dsh-music/tts-logs' }), lres)
+      const degen = JSON.parse(lres.body).logs.find((l) => l.kind === 'degenerate')
+      expect(degen).toBeTruthy()
+      expect(String(degen.detail)).toContain('超长静音')
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('accepts a wav with short natural pauses (normal speech) — not flagged as degenerate', async () => {
+    // 对照: 正常朗读的句间停顿（几百 ms）不能误判为"超长静音"。构造 10s 语音中间
+    // 夹几处 <0.5s 静音（真实停顿）→ 应正常通过。
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      const voiceSec = Buffer.alloc(48000)
+      for (let i = 0; i < voiceSec.length; i += 4) voiceSec.writeInt16LE(15000, i)
+      const shortPause = Buffer.alloc(12000) // 0.25s 静音（正常句间停顿）
+      const parts = []
+      for (let i = 0; i < 10; i++) { parts.push(voiceSec); if (i < 9) parts.push(shortPause) }
+      const data = Buffer.concat(parts) // 10s 语音 + 2.25s 停顿 ≈ 12.25s
+      stubTts(pcmWav({ data }))
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(200) // 正常停顿不触发"超长静音"判定
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
   it('resolves the TTS key from the DSH v1 refs:-nested credentials layout', async () => {
     // DSH >= v1 stores keys under a refs: block at two-space indent.
     const { handler, cleanup } = boot({

@@ -1714,9 +1714,10 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
-  it('opens the panel on clicking the bar name (track) or double-clicking the idle title', async () => {
-    // 单击播放条左侧名称（有曲目时的 .dsh-music-bar-name）→ 打开面板弹窗（再单击关闭，
-    // toggle）；停止状态时的 .dsh-music-bar-idle「DSH音乐播放器」保持双击打开（未改）。
+  it('opens the panel on clicking the bar name (track) or the idle title', async () => {
+    // 单击播放条左侧名称（有曲目时的 .dsh-music-bar-name）或停止状态的怠速标题
+    // .dsh-music-bar-idle「DSH音乐播放器」→ 打开面板弹窗（再单击关闭，toggle）——
+    // 与有曲目时单击歌名行为完全一致。
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -1725,19 +1726,19 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { root.render(React.createElement('div', null, bar, panel)) })
     const panelEl = container.querySelector('.dsh-music-panel')
     expect(panelEl).toBeTruthy()
-    // 停止状态（无曲目）：双击标题 → 打开
+    // 停止状态（无曲目）：单击标题 → 打开
     const idle = container.querySelector('.dsh-music-bar-idle')
     expect(idle).toBeTruthy()
     expect(panelEl.style.display).toBe('none')
-    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    act(() => { idle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).not.toBe('none')
-    // 再双击 → 关闭（toggle）
-    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 再单击 → 关闭（toggle）
+    act(() => { idle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).toBe('none')
-    // 播放本地曲目：先打开面板点 a.mp3（复用 idle 双击打开面板）
-    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 播放本地曲目：先打开面板点 a.mp3（复用 idle 单击打开面板）
+    act(() => { idle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
     act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -1752,6 +1753,72 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).not.toBe('none')
+  })
+
+  it('closes the player panel with the Escape key', async () => {
+    // Esc 关闭播放面板：面板打开时按 Esc → 关闭；再 Esc（面板已关）→ 不报错。
+    // 内层自带 Esc 语义的弹层（.dsh-music-picker-overlay，如新建/重命名歌单的
+    // prompt、删除确认、各在线平台登录、定时任务编辑、版本更新弹窗）在场时，
+    // Esc 归弹层自身处理，不关闭面板——见下一个用例。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    // 初始关闭
+    expect(panelEl.style.display).toBe('none')
+    // 打开面板（右侧「打开播放列表」按钮）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // Esc → 关闭
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 面板已关时再按 Esc → 无副作用（不抛错、保持关闭）
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+  })
+
+  it('Escape while an inner picker overlay is open closes only the overlay, not the panel', async () => {
+    // 新建/重命名歌单等 prompt（portal 到 body 的 .dsh-music-picker-overlay）打开时
+    // 按 Esc：面板保持打开，弹层自行关闭（PromptModal 自带的 onKeyDown 处理）。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 打开「＋ 新建歌单」prompt（音乐页子标签栏末尾的 ＋ 按钮）
+    const addBtn = [...container.querySelectorAll('.dsh-music-subtab.add')].find((b) => b.title === '新建歌单')
+    expect(addBtn).toBeTruthy()
+    act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const promptBox = container.querySelector('.dsh-music-picker-overlay')
+    expect(promptBox).toBeTruthy()
+    const input = promptBox.querySelector('.dsh-music-prompt-input')
+    expect(input).toBeTruthy()
+    // 内层弹层在场时按 Esc → 面板保持打开。真实场景焦点在弹层输入框内，
+    // 事件从 input 冒泡：面板的 capture 处理器先看到弹层在场而让行，
+    // 随后 PromptModal 自带的 onKeyDown 关掉弹层。
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // prompt 已被 Esc 关闭
+    expect(container.querySelector('.dsh-music-picker-overlay')).toBeNull()
+    // 弹层已关、面板仍开 → 再按 Esc → 面板关闭
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
   })
 
   it('clicking the quality badge does NOT open the panel (track name/artist do)', async () => {
@@ -3755,6 +3822,7 @@ describe('dsh-music-player client render smoke', () => {
     await new Promise((r) => setTimeout(r, 0))
     const audio = audios[0]
     expect(audio).toBeTruthy()
+    const preAudio = audios[1] // 隐藏预载元素（讲书双缓冲的 preAudio）
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -3770,7 +3838,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // flush the async /meta (charOffsets) + /text (subtitle) fetches
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    return { container, audio }
+    return { container, audio, preAudio }
   }
 
   it('fills the AI 讲书 progress bar by read-char / total-char (not chunk time ratio)', async () => {
@@ -3815,6 +3883,103 @@ describe('dsh-music-player client render smoke', () => {
     const p2 = parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
     expect(p2).toBeGreaterThan(p1)
     expect(p2).toBeCloseTo((10 + 20 * 0.5) / 30 * 100, 1) // 50%
+    bookTextFixture = ''
+  })
+
+  it('shows "AI 合成中…" when the preload request has not returned data yet (stalled synthesis)', async () => {
+    // Regression（TTS 上游慢合成静默卡住）: preloadBook 在发起预取时同步置位
+    // bookBufferedFrom，旧逻辑据此判定「已预热」→ ended 后静默切块（不显示任何
+    // 缓冲提示）。若预取请求其实卡在合成（TTS 上游数十秒才返回），用户看到的是
+    // 无声无息、字幕不动的「卡住」。修正：warmed 必须同时满足 preAudio 真拿到了
+    // 可播数据（readyState>=1 / buffered 非空）；预取无数据 → 走非静默切块 →
+    // 播放条显示「AI 合成中… Ns」+ 60s 超时兜底。
+    const audios = []
+    class StallPreloadAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this._resolvePlay = null }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+      play() {
+        this.paused = false
+        // 切到卡住块后 play() 挂起（真实浏览器：无数据不派发 canplay，play 不 resolve）——
+        // 直到手动 resolvePlay() 模拟「TTS 终于返回、开始播放」。
+        this._playPromise = new Promise((res) => { this._resolvePlay = res })
+        return this._playPromise
+      }
+      resolvePlay() { if (this._resolvePlay) { const r = this._resolvePlay; this._resolvePlay = null; r() } }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '卡住预取提示测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 10, 30]
+    bookTextFixture = '甲'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', StallPreloadAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const preAudio = audios[1]
+    expect(audio).toBeTruthy()
+    expect(preAudio).toBeTruthy()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('卡住预取提示测试'))
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // chunk0 播放中，preloadBook(chunk1) 已发出（preAudio.src 指向 from=1）
+    expect(String(audio.src || '')).toContain('from=0')
+    expect(String(preAudio.src || '')).toContain('from=1')
+    // 模拟预取请求卡住：preAudio 尚未拿到任何可播数据（真实浏览器此时 readyState=0）
+    preAudio.readyState = 0
+    preAudio.buffered = { length: 0 }
+    // chunk0 播完 → 自动切 chunk1
+    audio.duration = 10
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=1')
+    // 预取无数据 → 非静默：播放条应显示「AI 合成中…」缓冲提示（而不是无声卡住）
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeTruthy()
+    // TTS 终于返回、开始播放 → 缓冲提示清除
+    audio.resolvePlay()
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
+    bookTextFixture = ''
+  })
+
+  it('keeps the chunk switch silent (no buffer flash) when the preload is truly ready', async () => {
+    // 对照：preAudio 真拿到了可播数据（readyState>=2）时，ended 切块仍是静默的——
+    // 不闪「AI 合成中」提示（预热成功的正常路径，瞬时切换无感）。
+    const { container, audio, preAudio } = await mountProgressBook({ bookName: '预热就绪静默测试.txt', charOffsets: [0, 10, 30], text: '甲' })
+    expect(String(preAudio.src || '')).toContain('from=1')
+    preAudio.readyState = 2 // HAVE_CURRENT_DATA：preAudio 已缓冲到可播数据
+    preAudio.buffered = { length: 1 }
+    audio.duration = 10
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=1')
+    // preAudio 就绪 → 静默切块：无缓冲提示（正常预热路径不闪 spinner）
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
     bookTextFixture = ''
   })
 
