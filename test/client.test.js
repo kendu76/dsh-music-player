@@ -736,6 +736,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(audioEl.src).toContain('/dsh-music/radio/play?u=')
     // 播放条名称显示电台名
     expect(container.querySelector('.dsh-music-bar-name-text').textContent).toContain('China Plus')
+    // 播放条名称前的图标：网络电台用收音机图标（非音符图标）
+    const radioIcon = container.querySelector('.dsh-music-bar-name .dsh-music-note path')
+    expect(radioIcon).toBeTruthy()
+    expect(radioIcon.getAttribute('d')).toContain('M3.24 6.15')
 
     // 收藏：点行尾 ♡ → POST /radio/favs（用包装 fetch 捕获请求）
     let radioFavPost = null
@@ -10079,6 +10083,51 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('酷狗登录后同步 store 昵称：切到「关于」页运行状态显示「已登录（昵称）」', async () => {
+    // 对齐 QQ 登录同步 store 的先例：酷狗登录成功后 kgLoggedIn/kgNickname 写入
+    // 全局 store，About 页酷狗行即时显示「已登录（昵称）」（无需刷新页面）。
+    const baseFetch = globalThis.fetch
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: false, userid: '' })
+      if (u === '/dsh-music/kg/login/start') return jsonRes({ ok: true, key: 'K1', image: 'data:image/jpeg;base64,xxx' })
+      if (u.includes('/dsh-music/kg/login/check')) return jsonRes({ ok: true, status: 'success', userid: '1785839222', nickname: '酷狗昵称' })
+      return baseFetch(u, opts)
+    })
+    vi.stubGlobal('fetch', fetcher)
+    vi.useFakeTimers()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+      act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      const kgBtn = [...container.querySelectorAll('.dsh-music-qq-login-btn')].find((b) => b.textContent === '酷狗音乐APP登录')
+      expect(kgBtn).toBeTruthy()
+      act(() => { kgBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // flush /start, then fire the 1.5s poll which returns success
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      act(() => { vi.advanceTimersByTime(2000) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      // 登录成功后面板展示昵称（退出登录（昵称））
+      expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent.includes('退出登录（酷狗昵称）'))).toBe(true)
+      // 登录态同步到 store：切到「关于」页运行状态应显示「已登录（酷狗昵称）」
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      const kgRow = [...container.querySelectorAll('.dsh-music-about-row')].find((r) => r.textContent.includes('酷狗音乐'))
+      expect(kgRow.textContent).toContain('已登录（酷狗昵称）')
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('preserves the QQ playlist layer when switching tabs within a session', async () => {
     // Regression: QQOnlinePanel used to unmount on tab switch; on remount it restored
     // the persisted 'playlist' layer, so switching away and back yanked the user
@@ -10335,7 +10384,7 @@ describe('dsh-music-player client render smoke', () => {
       description: '来自 package.json 的插件简介。',
       ttsConfigured: true, ttsReason: 'ok', ttsProvider: 'xiaomi-mimo',
       qqLoggedIn: true, qqUin: '123456', qqNickname: '测试用户', qqLoginFrom: 'wx',
-      kgLoggedIn: true,
+      kgLoggedIn: true, kgNickname: '酷狗昵称',
       books: [{ id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }],
     }
     vi.resetModules(); registered = []; lastFilesUrl = null
@@ -10398,7 +10447,8 @@ describe('dsh-music-player client render smoke', () => {
     expect(rowText.some((t) => t.includes('本地小说') && t.includes('1 本'))).toBe(true)
     expect(rowText.some((t) => t.includes('AI 讲书/新闻播报') && t.includes('已配置') && t.includes('xiaomi-mimo'))).toBe(true)
     expect(rowText.some((t) => t.includes('QQ音乐') && t.includes('已登录（微信）') && !t.includes('测试用户'))).toBe(true)
-    expect(rowText.some((t) => t.includes('酷狗音乐') && t.includes('已登录'))).toBe(true)
+    // 酷狗行显示账号昵称（对齐网易云「已登录（昵称）」；QQ 行只显示登录方式不显示昵称）
+    expect(rowText.some((t) => t.includes('酷狗音乐') && t.includes('已登录（酷狗昵称）'))).toBe(true)
 
     // 版权 / 仓库信息
     expect(container.textContent).toContain('github.com/kendu76/dsh-music-player')

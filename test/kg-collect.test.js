@@ -27,6 +27,7 @@ vi.mock('../lib/kugou.js', () => ({
   registerDevice: vi.fn(),
   createDeviceIdentity: vi.fn(),
   refreshSession: vi.fn(),
+  getMyUserInfo: vi.fn(),
   loginStart: vi.fn(),
   createQRLogin: vi.fn(),
   checkQRLogin: vi.fn(),
@@ -88,8 +89,7 @@ function boot() {
 
 let booted
 beforeEach(() => {
-  // 主动续命默认开启（KG_REFRESH_TTL = 24h），生产与测试一致；本文件覆盖
-  // 续命触发/在途去重/失效登出路径。
+  // 主动续命已停用（2026-09-06）；本文件覆盖登录/失效登出/设备指纹等路径。
   booted = boot()
   writeFileSync(booted.cookieFile, JSON.stringify({
     session: {
@@ -190,8 +190,8 @@ describe('酷狗「我喜欢」集合接口（/dsh-music/kg/liked，供播放条
 
 describe('酷狗登录态失效 → 不做被动补救，直接登出 + kgLoginDead 标记', () => {
   it('业务接口报设备不匹配（20017）→ 不刷新补救，清空会话并返回 kgLoginDead:true', async () => {
-    // 被动补救已移除：token 失效由「请求前主动续命（24h TTL）」预防；若业务仍报
-    // 设备不匹配，说明会话确实死了，直接登出让前端跳回扫码页，不再现场刷新重试。
+    // 主动续命已停用 + 无被动补救：token 真过期时业务接口报设备不匹配，直接登出
+    // 让前端跳回扫码页重新扫码（酷狗无其他续命手段，重扫是唯一正道）。
     vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))
     const res = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
@@ -288,125 +288,53 @@ describe('酷狗登出/失效保留设备指纹（guid/mid/dfid），重扫=老�
   })
 })
 
-describe('酷狗主动续命：token 陈旧时提前静默刷新（>24h）', () => {
-  it('savedAt 超过 24h → 请求前先静默刷新换新 token', async () => {
+describe('酷狗登录 token 直接使用：login/check 不再做登录后刷新', () => {
+  it('扫码登录成功 → 直接存扫码 token，不调用 refreshSession（对齐 MakcRe）', async () => {
     writeFileSync(booted.cookieFile, JSON.stringify({
-      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-      loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000,
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: '', userid: '', vip_type: '', vip_token: '' },
+      loggedIn: false, savedAt: Date.now(),
     }))
-    vi.mocked(KG.refreshSession).mockResolvedValue({ token: 'newtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
-    const res = makeRes()
-    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    expect(res.status).toBe(200)
-    // 主动续命在请求前刷新了一次
-    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
-    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1)
-    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.session.token).toBe('newtok')
-  })
-
-  it('savedAt 新鲜（<24h）→ 不主动刷新，直接请求', async () => {
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
-    const res = makeRes()
-    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    expect(res.status).toBe(200)
-    expect(KG.refreshSession).not.toHaveBeenCalled()
-  })
-
-  it('主动续命遇设备不匹配（token 已死）→ 自动登出 + kgLoginDead，且保留指纹', async () => {
-    writeFileSync(booted.cookieFile, JSON.stringify({
-      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-      loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000,
-    }))
-    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
-    const res = makeRes()
-    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    expect(res.status).toBe(502)
-    const d = JSON.parse(res.body)
-    expect(d.kgLoginDead).toBe(true)
-    expect(KG.getMyPlaylists).not.toHaveBeenCalled() // 续命失败即死，不再发原请求
-    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.loggedIn).toBe(false)
-    expect(saved.session.dfid).toBe('DFID') // 指纹仍保留
-  })
-})
-
-describe('酷狗主动续命在途去重：并发请求共享一次刷新（防旧 token 二连发被误判已死）', () => {
-  const seedStale = () => writeFileSync(booted.cookieFile, JSON.stringify({
-    session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
-    loggedIn: true, savedAt: Date.now() - 25 * 60 * 60 * 1000, // >24h TTL：后续请求都会通过「该刷新」检查
-  }))
-  // 可控刷新桩：started 在刷新真正发出时兑现（保证后续请求命中「在途」窗口），resolve/reject 手动放行
-  const stallRefresh = () => {
-    let settle, signalStarted
-    const started = new Promise((r) => { signalStarted = r })
-    vi.mocked(KG.refreshSession).mockImplementation(() => new Promise((resolve, reject) => { settle = { resolve, reject }; signalStarted() }))
-    return { started, resolve: (v) => settle.resolve(v), reject: (e) => settle.reject(e) }
-  }
-
-  it('REGRESSION: 刷新在途时第二请求到达 → 共享同一刷新，login_by_token 只发一次', async () => {
-    seedStale()
-    const gate = stallRefresh()
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
-    const p1 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), makeRes())
-    await gate.started // 第一个请求已进入挂起的刷新
-    const p2 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), makeRes())
-    await new Promise((r) => setTimeout(r, 10)) // 给第二请求时间走到续命检查点
-    expect(KG.refreshSession).toHaveBeenCalledTimes(1) // 命中在途共享，未二次发起
-    gate.resolve({ token: 'newtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
-    await Promise.all([p1, p2])
-    expect(KG.refreshSession).toHaveBeenCalledTimes(1) // 全程仍只有一次真实刷新
-    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.loggedIn).toBe(true)
-    expect(saved.session.token).toBe('newtok')
-  })
-
-  it('在途刷新被判死（20018）→ 两个调用方共享同一失败，会话只清一次', async () => {
-    seedStale()
-    const gate = stallRefresh()
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
-    const res1 = makeRes(); const res2 = makeRes()
-    const p1 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res1)
-    await gate.started
-    const p2 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res2)
-    await new Promise((r) => setTimeout(r, 10))
-    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
-    gate.reject(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
-    await Promise.all([p1, p2])
-    for (const res of [res1, res2]) {
-      expect(res.status).toBe(502)
-      expect(JSON.parse(res.body).kgLoginDead).toBe(true)
-    }
-    expect(KG.getMyPlaylists).not.toHaveBeenCalled() // 两个调用方都没再发业务请求
-    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.loggedIn).toBe(false)
-  })
-
-  it('刷新挂起期间发生重扫登录 → 旧 token 的刷新结果作废，不覆盖新会话', async () => {
-    seedStale()
-    const gate = stallRefresh()
-    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
-    const res = makeRes()
-    const pPlay = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
-    await gate.started // 旧 token 的主动续命刷新已挂起
-    // 重扫链路（真实时序）：出码 → 轮询成功换 qr token → 登录后标准作用域刷新
     vi.mocked(KG.createQRLogin).mockResolvedValue({ key: 'K9', imageDataUrl: '', expiresAt: Date.now() + 60000 })
     const startRes = makeRes()
     await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/start' }), startRes)
     const qrToken = 'qrtok' + 'x'.repeat(50)
     vi.mocked(KG.checkQRLogin).mockResolvedValue({ status: 'success', message: '登录成功', tokenInfo: { token: qrToken, userid: '1785839222', vip_type: '', vip_token: '' } })
-    // login/check 的登录后刷新不再挂起：直接给标准作用域结果（新链路先完成）
-    vi.mocked(KG.refreshSession).mockImplementation(() => Promise.resolve({ token: 'stdtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' }))
+    vi.mocked(KG.getMyUserInfo).mockResolvedValue({ userid: '1785839222', nickname: '杜双庆', pic: '', signature: '', username: '' })
     const checkRes = makeRes()
     await booted.handler(makeReq({ url: '/dsh-music/kg/login/check?key=K9' }), checkRes)
-    // 放行迟到的旧 token 刷新结果（此时会话 token 已是 stdtok → 应被作废）
-    gate.resolve({ token: 'STALE' + 'y'.repeat(50) })
-    await pPlay
-    expect(res.status).toBe(200) // 播放面板请求用新会话照常完成
-    expect(KG.getMyPlaylists).toHaveBeenCalledWith(expect.objectContaining({ token: 'stdtok' }))
+    expect(JSON.parse(checkRes.body).loggedIn).toBe(true)
+    expect(KG.refreshSession).not.toHaveBeenCalled() // 登录后不做刷新/兑换
+    // 登录后抓了一次用户资料 → 响应与 cookie 都带昵称
+    expect(KG.getMyUserInfo).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(checkRes.body).nickname).toBe('杜双庆')
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
-    expect(saved.session.token).toBe('stdtok') // 迟到的旧刷新没有覆盖新登录 token
+    expect(saved.loggedIn).toBe(true)
+    expect(saved.session.token).toBe(qrToken) // cookie 存的就是扫码 token 本身
+    expect(saved.session.nickname).toBe('杜双庆')
+  })
+
+  it('抓昵称失败不阻断登录（cookie nickname 留空，status 补抓兜底）', async () => {
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: '', userid: '', vip_type: '', vip_token: '' },
+      loggedIn: false, savedAt: Date.now(),
+    }))
+    vi.mocked(KG.createQRLogin).mockResolvedValue({ key: 'K9', imageDataUrl: '', expiresAt: Date.now() + 60000 })
+    const startRes = makeRes()
+    await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/start' }), startRes)
+    vi.mocked(KG.checkQRLogin).mockResolvedValue({ status: 'success', message: '登录成功', tokenInfo: { token: 'tk' + 'x'.repeat(50), userid: '1785839222', vip_type: '', vip_token: '' } })
+    vi.mocked(KG.getMyUserInfo).mockRejectedValueOnce(new Error('网络超时')) // 登录时抓失败
+    const checkRes = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/login/check?key=K9' }), checkRes)
+    expect(JSON.parse(checkRes.body).loggedIn).toBe(true) // 登录不受影响
+    const saved1 = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved1.session.nickname).toBe('') // 昵称留空
+    // 后续 status 请求补抓成功 → 昵称落 cookie 并返回
+    vi.mocked(KG.getMyUserInfo).mockResolvedValue({ userid: '1785839222', nickname: '杜双庆', pic: '', signature: '', username: '' })
+    const stRes = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/status' }), stRes)
+    expect(JSON.parse(stRes.body).nickname).toBe('杜双庆')
+    const saved2 = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved2.session.nickname).toBe('杜双庆')
   })
 })
 
