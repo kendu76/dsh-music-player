@@ -188,8 +188,7 @@ describe('酷狗「我喜欢」集合接口（/dsh-music/kg/liked，供播放条
   })
 })
 
-describe('酷狗登录态失效 → 不做被动补救，直接登出 + kgLoginDead 标记', () => {
-  it('业务接口报设备不匹配（20017）→ 不刷新补救，清空会话并返回 kgLoginDead:true', async () => {
+describe('酷狗登录态失效 → 不做被动补救，直接登出 + kgLoginDead 标记', () => {  it('业务接口报设备不匹配（20017）→ 不刷新补救，清空会话并返回 kgLoginDead:true', async () => {
     // 主动续命已停用 + 无被动补救：token 真过期时业务接口报设备不匹配，直接登出
     // 让前端跳回扫码页重新扫码（酷狗无其他续命手段，重扫是唯一正道）。
     vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))

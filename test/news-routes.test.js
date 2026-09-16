@@ -1182,6 +1182,232 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
   })
 })
 
+describe('新闻采集模型（pin 校验 / 失效回退 / 兜底不自我继承）', () => {
+  // 定时偏好 body：model 省略 = 不改动；显式传 null = 跟随当前会话。
+  const scheduleBody = (model) => JSON.stringify({
+    enabled: true,
+    ...(model === undefined ? {} : { model }),
+    shifts: [{ id: 's1', time: '08:00', autoplay: false, itemCount: 8, scope: { categories: ['国内'], topics: [] } }],
+  })
+  const makeCreate = (created) => async (opts) => {
+    created.push(opts)
+    return { agent: { id: opts.sessionId, session: {}, followup: () => {} } }
+  }
+
+  it('pin 的采集模型在 DSH 侧改名后：回退到活跃会话模型，并落下面板可见的「模型失效」提示', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    agents.service.get('agent-live').options = { provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' }
+    const llm = {
+      listProviders: () => [{ id: 'commandcode' }, { id: 'deepseek-official' }],
+      listModels: async (pid) => (pid === 'commandcode' ? [{ id: 'deepseek/deepseek-v4.1-flash' }, { id: 'moonshotai/Kimi-K3' }] : []),
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      // 面板里 pin 住的还是改名前的旧 id（线上事故原样：deepseek-v4-flash → v4.1-flash）
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      // 不再拿失效模型建会话（否则第一回合就 UNKNOWN_MODEL 静默死掉），改用活跃会话模型
+      expect(created.length).toBe(1)
+      expect(created[0].agentOptions).toEqual({ provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' })
+      // 失败提示可见（否则用户只看到「没反应/还在用老模型」）
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      const failures = JSON.parse(s.body).failures
+      expect(failures.length).toBe(1)
+      expect(failures[0].kind).toBe('model')
+      expect(failures[0].reason).toContain('deepseek/deepseek-v4-flash')
+      expect(failures[0].reason).toContain('deepseek/deepseek-v4.1-flash')
+    } finally { cleanup() }
+  })
+
+  it('pin 的采集模型仍然可用：按面板选择建会话，且不落失败提示', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    agents.service.get('agent-live').options = { provider: 'deepseek-official', model: 'deepseek-flash' }
+    const llm = {
+      listProviders: () => [{ id: 'commandcode' }],
+      listModels: async () => [{ id: 'deepseek/deepseek-v4.1-flash' }],
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' }),
+      }), makeRes())
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), makeRes())
+      expect(created[0].agentOptions).toEqual({ provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' })
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      expect(JSON.parse(s.body).failures).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('llm 服务缺失 / 读不到模型列表时不拦截（校验判定不出来就放行）', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    // 无 llm；pin 的模型甚至是不存在的 provider —— 仍按原样建会话（不误伤）
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'ghost', model: 'ghost-model' }),
+      }), makeRes())
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), makeRes())
+      expect(created[0].agentOptions).toEqual({ provider: 'ghost', model: 'ghost-model' })
+    } finally { cleanup() }
+  })
+
+  it('模型失效且无活跃会话模型可回退：不创建执行会话（走面板手动回退），提示仍然可见', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) }) // 活跃会话无 options
+    const llm = {
+      listProviders: () => [{ id: 'commandcode' }],
+      listModels: async () => [{ id: 'deepseek/deepseek-v4.1-flash' }],
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(false)
+      expect(data.fallback).toBe(true)
+      expect(created.length).toBe(0)
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      expect(JSON.parse(s.body).failures[0].kind).toBe('model')
+    } finally { cleanup() }
+  })
+
+  it('跟随当前会话（model=null）：兜底跳过本插件自己的执行会话，不再自我继承旧模型', async () => {
+    const created = []
+    const agents = makeAgents({
+      agentsCreate: makeCreate(created),
+      extraRoots: [
+        { id: 'agent-user', status: 'running', session: { id: 'agent-user' }, options: { provider: 'deepseek-official', model: 'deepseek-flash' } },
+        // 上一轮的收集会话：正是它以前会被复制给下一轮（面板上表现为「一直用最初那个模型」）
+        { id: 'news-exec-old', status: 'idle', session: { id: 'news-exec-old' }, options: { provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' } },
+      ],
+    })
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: scheduleBody(null) }), makeRes())
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), makeRes())
+      expect(created[0].agentOptions).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+    } finally { cleanup() }
+  })
+
+  it('只改采集模型也递增 prefVersion（便于判定「定时偏好已变更」）', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const r1 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'a', model: 'm1' }),
+      }), r1)
+      expect(JSON.parse(r1.body).schedulePrefs.prefVersion).toBe(1)
+      // 定时任务完全不变，只换模型
+      const r2 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'a', model: 'm2' }),
+      }), r2)
+      expect(JSON.parse(r2.body).schedulePrefs.prefVersion).toBe(2)
+      expect(JSON.parse(r2.body).schedulePrefs.model).toEqual({ provider: 'a', model: 'm2' })
+    } finally { cleanup() }
+  })
+
+  it('pin 的 provider 整条被删掉：同样识别为失效（提示「已不存在」），回退到活跃会话模型', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    agents.service.get('agent-live').options = { provider: 'deepseek-official', model: 'deepseek-flash' }
+    const llm = {
+      listProviders: () => [{ id: 'deepseek-official' }], // goat-provider 已被删除
+      listModels: async (pid) => (pid === 'deepseek-official' ? [{ id: 'deepseek-flash' }] : []),
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'goat-provider', model: 'goat-model' }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      expect(created[0].agentOptions).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      const f = JSON.parse(s.body).failures[0]
+      expect(f.kind).toBe('model')
+      expect(f.reason).toContain('goat-provider')
+      expect(f.reason).toContain('已不存在')
+    } finally { cleanup() }
+  })
+
+  it('pin 的 provider 没了、活跃会话模型也失效：不建会话（不白跑一轮），提示「采集模型不可用」', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    // 活跃会话是 provider 被删之前建的 → 它的模型同样失效（这正是「只校验 pin」会漏掉的情形）
+    agents.service.get('agent-live').options = { provider: 'goat-provider', model: 'goat-model' }
+    const llm = {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-flash' }],
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: scheduleBody({ provider: 'goat-provider', model: 'goat-model' }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(false)
+      expect(data.fallback).toBe(true)
+      expect(created.length).toBe(0)
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      const f = JSON.parse(s.body).failures[0]
+      expect(f.kind).toBe('model')
+      expect(f.reason).toContain('采集模型不可用')
+      expect(f.reason).toContain('不创建收集会话')
+    } finally { cleanup() }
+  })
+
+  it('跟随当前会话（model=null）时，活跃会话模型本身失效：也不建注定失败的会话', async () => {
+    const created = []
+    const agents = makeAgents({ agentsCreate: makeCreate(created) })
+    agents.service.get('agent-live').options = { provider: 'goat-provider', model: 'goat-model' }
+    const llm = {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-flash' }],
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, llm })
+    try {
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: scheduleBody(null) }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), res)
+      expect(JSON.parse(res.body).fallback).toBe(true)
+      expect(created.length).toBe(0)
+      const s = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), s)
+      const f = JSON.parse(s.body).failures[0]
+      expect(f.kind).toBe('model')
+      expect(f.reason).toContain('当前会话模型')
+      expect(f.reason).toContain('已不存在')
+    } finally { cleanup() }
+  })
+})
+
 describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
   it('每次执行都新建一个执行会话（不复用），news_broadcast 绑定 sessionId', async () => {
     let created = []
@@ -1461,6 +1687,11 @@ function makeAgents(opts = {}) {
   ]
   if (opts.dedicated) {
     base.push({ id: opts.dedicated.id, status: opts.dedicated.status || 'idle', session: {}, ...(opts.dedicated.options ? { options: opts.dedicated.options } : {}) })
+  }
+  // 自定义追加的 root 会话（按数组顺序排在最后 → 即「最近活跃会话」候选），
+  // 供「模型兜底的来源选择」类用例构造 news-exec-* 与真人会话并存的情形。
+  if (Array.isArray(opts.extraRoots)) {
+    for (const r of opts.extraRoots) base.push({ status: 'idle', ...r })
   }
   const agents = base.map((a) => ({ ...a, followup: (msg) => injected.push({ id: a.id, status: a.status, msg }) }))
   const byId = new Map(agents.map((a) => [a.id, a]))

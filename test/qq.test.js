@@ -6,7 +6,7 @@
  * route can be exercised against a fake upstream stream without network.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -252,6 +252,25 @@ describe('dsh-music-player QQ online routes', () => {
       expect(res.status).toBe(404)
       // 取链失败：不带「真实品质」头
       expect(res.headers['X-DSH-QQ-Quality']).toBeUndefined()
+    } finally { cleanup() }
+  })
+
+  it('REGRESSION: /qq/status 只看「cookie 是否存在」，不做主动过期探测', async () => {
+    // 2026-09-16 事故与两次返工后的定稿：曾用 music.UserInfo.userInfo/GetLoginUserInfo 判登录态，
+    // 而它对**刚登录、明确有效**的微信会话同样返回 500003 → 「刚登录一刷新页面就提示登录过期」。
+    // 结论：不做任何主动探测；过期只在**实际播放失败**时由客户端发现并把面板切回登录 UI。
+    const { handler, cleanup } = boot()
+    // 走真实登录流程把 cookie 放进内存（比直接写文件确定：启动期的 loadQQCookie 有竞态）
+    // 微信态走 checkWXQRLogin（路由按 key 里的 type=wx 分流）
+    vi.mocked(QQ.checkWXQRLogin).mockResolvedValue({ source: 'wx', key: 'type=wx&uuid=U&state=S', status: 'success', cookie: 'uin=123; qqmusic_key=ABC; tmeLoginType=1', cookies: { uin: '123' }, extra: {} })
+    try {
+      await handler(makeReq({ url: '/dsh-music/qq/login/check?key=type%3Dwx%26uuid%3DU%26state%3DS' }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/status' }), res)
+      const d = JSON.parse(res.body)
+      expect(d).toMatchObject({ loggedIn: true, uin: '123', loginFrom: 'wx' })
+      expect(d.authExpired).toBeUndefined() // 不再下发过期标记
+      expect(vi.mocked(QQ.detectVip)).not.toHaveBeenCalled() // 也不做 vkey 探测
     } finally { cleanup() }
   })
 

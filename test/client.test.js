@@ -149,6 +149,15 @@ const newsScheduleDefault = {
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+// 面板「新闻采集模型」选择器的数据源（/news/models）。commandcode 下两个可选模型；
+// blank-llm 故意不给模型，用于验证「无可用模型的 provider 置灰不可选」。
+const newsModelsFixture = {
+  ok: true,
+  providers: [
+    { id: 'commandcode', name: 'commandcode', models: [{ id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }, { id: 'moonshotai/Kimi-K3', name: 'Kimi K3' }] },
+    { id: 'blank-llm', name: 'blank-llm', models: [] },
+  ],
+}
 let newsFailuresServer = [] // 最近收集失败（非空时新闻列表页定时状态行下方显示失败提示行）
 let newsRunState = null // 收集运行态（null=空闲；非 null 时面板显示「收集中」并禁用 ▶）
 async function fetchStub(url, opts) {
@@ -173,6 +182,9 @@ async function fetchStub(url, opts) {
       return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, changed: true })
     }
     return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, failures: newsFailuresServer })
+  }
+  if (u === '/dsh-music/news/models') {
+    return jsonRes(newsModelsFixture)
   }
   if (u.startsWith('/dsh-music/news/') && u.endsWith('/meta')) {
     return jsonRes(newsMetaFixture)
@@ -399,7 +411,11 @@ async function bootClient() {
 // 默认 5s：2 核 CI runner 上全文件 142 用例并行跑时，fetch 链 + React 提交
 // 可能被 CPU 争抢拖过 1.5s（实测出现过一次推荐歌单 viewtab 超时假失败）；
 // 正常路径毫秒级返回，超时只影响真失败时多久报错。
-async function waitForText(container, selector, text, timeout = 5000) {
+// 轮询等待某选择器出现且文本**完全等于** text（注意是精确匹配，不是包含）。
+// 默认 15s：本文件每个用例都要重建整棵 React 树（24 个测试文件并行时 CPU 争抢严重），
+// 5s 的墙钟上限在满负载下会被饿死而误报超时（实测同一用例单独跑 ~50ms）。与 vitest.config.js
+// 的 testTimeout=20000 配套：先等状态到，超时才是真失败。
+async function waitForText(container, selector, text, timeout = 15000) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const el = [...container.querySelectorAll(selector)].find((b) => b.textContent === text);
@@ -422,6 +438,15 @@ function baseManifest() {
 }
 
 beforeEach(async () => {
+  // 关键：客户端对 Host prefs 的写入是 **800ms 防抖**（scheduleServerPrefsFlush）。用例结束时
+  // 挂着的那次写入会在**下一个用例期间**才落地，把上例的 dsh-music-qq-ui（QQ 面板所在层）、
+  // 播放进度等写进共享的 prefsServer —— 造成跨用例污染（实测：QQ 面板被恢复成上例的
+  // 「播放列表层」，主界面 viewtab 永不出现，该用例 15s 超时；约 1/6 概率随机命中某条用例）。
+  // 客户端本身就有 pagehide 兜底 flush：这里先派发一次，把所有旧实例的待写内容同步落地，
+  // 随后再把快照清空 —— 迟到的写入就被吸收了（flush 会清空 dirty 集合，之后定时器是空跑）。
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event('pagehide'))
+  }
   vi.resetModules()
   prefsServer = {}
   prefsPosts = []
@@ -9797,7 +9822,7 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { audio.emit('error') })          // 790 失败 → 跳过
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(audio.src).toContain('/dsh-music/qq/play/789')
-      act(() => { audio.emit('play') })           // 789 成功播放 → 计数清零
+      act(() => { audio.emit('playing') })        // 789 真实起播 → 计数清零
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     }
     // 三轮都正常跳过、从未误报整列失败；最终停在 789 且无错误
@@ -9867,6 +9892,74 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('音频加载或解码失败')
   })
 
+  it('QQ 整列播不出来（实际使用中发现）→ 面板回登录 UI（两个入口），且不再反复跳歌', async () => {
+    // 定稿约定：**不做任何主动过期探测**；只有真播不出来时才把面板切回登录 UI。
+    // 单曲失败仍自动跳下一首（多半是版权/VIP 限制）；整列都失败才认为「可能登录失效」。
+    const audios = []
+    class ErrAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    // store.qqLoggedIn 来自 manifest（引擎据此判断「原本已登录 → 该提示重新登录」）
+    manifest = { ...baseManifest(), qqLoggedIn: true, qqUin: '123456', qqLoginFrom: 'wx' }
+    qqLoggedIn = true
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ErrAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 队列 2 首，全部失败：第 1 次失败 → 跳下一首（单曲失败不该丢回登录页）
+    act(() => { audio.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/qq/play/790')
+    // 第 2 次失败 → 这一轮还允许跳（守卫是「整轮试完」）……
+    act(() => { audio.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 第 3 次失败 → 整列都试过 → 判定「可能登录失效」：面板回登录 UI + 停止跳歌
+    act(() => { audio.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const qqPane = container.querySelector('.dsh-music-qq-pane')
+    expect(qqPane).toBeTruthy()
+    expect([...qqPane.querySelectorAll('.dsh-music-qq-login-btn')].map((b) => b.textContent)).toEqual(['QQ 登录', '微信登录'])
+    expect(qqPane.querySelector('.dsh-music-qq-login-tip').textContent).toContain('登录可能已失效')
+    const srcAfterStop = audio.src
+    act(() => { audio.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toBe(srcAfterStop) // 停住后不再跳歌
+  })
+
   it('stops after trying the whole queue when every online song fails', async () => {
     // Guard against an infinite skip loop: a 2-song queue where BOTH fail must
     // advance through the whole queue (789→790→wrap), then stop with the error
@@ -9927,6 +10020,69 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('音频加载或解码失败')
     // 停止后即使再报错也不再跳到别处（src 不再变化）
     const srcAfterStop = audio.src
+    act(() => { audio.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toBe(srcAfterStop)
+  })
+
+  it('整列在线曲目全失败时不会无限跳歌：失败源同样会派发 play，计数只能由真实起播清零', async () => {
+    // 现场事故：QQ 音乐登录过期后整列 VIP 曲目都取不到播放地址（/qq/play 404），
+    // 而浏览器对「加载失败」的源同样会先派发 'play'（play() 把 paused 置 false 即派发，
+    // 随后才 'error'）。旧实现把「跳过计数清零」挂在 'play' 上 → 每次失败前计数都被归零
+    // → 整列反复回绕、无限跳歌且不报错（用户看到「一直循环播放但播不了」）。
+    // 修复后计数只在真实起播（'playing'）时清零：整列试完即停下报错。
+    const audios = []
+    class PlayThenErrAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', PlayThenErrAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 队列 = [789, 790]，两首全失败；每轮都按真实浏览器的顺序派发 play → error
+    for (let i = 0; i < 8; i++) {
+      act(() => { audio.emit('play') })
+      act(() => { audio.emit('error') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    }
+    expect(container.textContent).toContain('音频加载或解码失败')
+    // 停住之后不再无休止回绕：再失败一轮也不会换歌
+    const srcAfterStop = audio.src
+    act(() => { audio.emit('play') })
     act(() => { audio.emit('error') })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(audio.src).toBe(srcAfterStop)
@@ -11008,6 +11164,91 @@ describe('news pane（新闻播报页签）', () => {
       expect(newsScheduleServer.shifts.length).toBe(2)
       expect(newsScheduleServer.shifts[1].scope.categories).toEqual([])
       expect(newsScheduleServer.shifts[1].scope.topics).toEqual(['AI'])
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
+  })
+
+  it('新闻采集模型：失效存值被如实列出（不再被下拉框静默替换成第一项），重选后落盘', async () => {
+    newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    // 线上事故原样：DSH 侧把模型改名成 deepseek/deepseek-v4.1-flash，面板里 pin 的还是旧 id
+    newsScheduleServer.model = { provider: 'commandcode', model: 'deepseek/deepseek-v4-flash' }
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 定位模型行：provider 下拉里有「跟随当前会话」，其父节点内第二个 select 是模型下拉
+      const providerSelect = [...container.querySelectorAll('select')]
+        .find((s) => [...s.options].some((o) => o.value === '' && o.textContent === '跟随当前会话'))
+      expect(providerSelect).toBeTruthy()
+      expect(providerSelect.value).toBe('commandcode')
+      const modelSelect = providerSelect.parentElement.querySelectorAll('select')[1]
+      expect(modelSelect).toBeTruthy()
+      // ⚠ 回归点：受控 select 的值若不在选项里，浏览器会静默回退显示第一项（看起来像已选 v4.1）
+      // ——这里必须等于真实存值，否则用户「改也白改」。
+      expect(modelSelect.value).toBe('deepseek/deepseek-v4-flash')
+      const staleOpt = [...modelSelect.options].find((o) => o.value === 'deepseek/deepseek-v4-flash')
+      expect(staleOpt).toBeTruthy()
+      expect(staleOpt.textContent).toContain('已失效')
+      // 无可用模型的 provider 置灰不可选（选中它只会得到无效偏好）
+      const blankOpt = [...providerSelect.options].find((o) => o.value === 'blank-llm')
+      expect(blankOpt.disabled).toBe(true)
+      // 重选为新模型 → 防抖后落盘新值
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+        setter.call(modelSelect, 'deepseek/deepseek-v4.1-flash')
+        modelSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
+      expect(newsScheduleServer.model).toEqual({ provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' })
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
+  })
+
+  it('新闻采集模型：provider 整条被删掉时也如实展示（⚠ 已失效），重选 provider 即可恢复', async () => {
+    newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    newsScheduleServer.model = { provider: 'goat-provider', model: 'goat-model' } // provider 已被删除
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const providerSelect = [...container.querySelectorAll('select')]
+        .find((s) => [...s.options].some((o) => o.value === '' && o.textContent === '跟随当前会话'))
+      // ⚠ 回归点：provider 不在列表里时，受控 select 同样会静默显示第一项（看起来像已选 commandcode）
+      expect(providerSelect.value).toBe('goat-provider')
+      const staleOpt = [...providerSelect.options].find((o) => o.value === 'goat-provider')
+      expect(staleOpt).toBeTruthy()
+      expect(staleOpt.textContent).toContain('已失效')
+      // provider 不在列表里 → 不渲染模型下拉（无从选起）；选回一个真实 provider 即恢复
+      expect(providerSelect.parentElement.querySelectorAll('select').length).toBe(1)
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+        setter.call(providerSelect, 'commandcode')
+        providerSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
+      expect(newsScheduleServer.model).toEqual({ provider: 'commandcode', model: 'deepseek/deepseek-v4.1-flash' })
     } finally {
       newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
     }
