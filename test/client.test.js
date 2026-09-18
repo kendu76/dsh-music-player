@@ -10,6 +10,8 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import React, { act } from 'react'
 import { renderToString } from 'react-dom/server'
 import { createRoot } from 'react-dom/client'
@@ -406,13 +408,15 @@ async function fetchStub(url, opts) {
 let radioTopFetches = 0
 let radioCnFetches = 0
 
-async function bootClient() {
+// AudioClass：默认用最简 FakeAudio；需要驱动 play/pause/error 等事件的用例传入自己的
+// 子类（FakeAudio 本身不派发事件，播放态要靠 emit 手动触发）。
+async function bootClient(AudioClass = FakeAudio) {
   factory = null
   registered = []
   radioTopFetches = 0
   radioCnFetches = 0
   window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
-  vi.stubGlobal('Audio', FakeAudio)
+  vi.stubGlobal('Audio', AudioClass)
   vi.stubGlobal('fetch', fetchStub)
   vi.stubGlobal('requestAnimationFrame', () => 0)
   vi.stubGlobal('cancelAnimationFrame', () => {})
@@ -10479,25 +10483,61 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
-    // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
-    const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns.slice(0, 4).map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '模糊浮入', '卡拉OK'])
-    expect(segBtns.slice(0, 4).findIndex((b) => b.classList.contains('on'))).toBe(0)
-    act(() => { segBtns[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 卡拉OK
+    // 歌词动效分段选择器：四个选项，默认 none（无动效）选中。
+    // 按「配置行标签」定位该行内的分段按钮（新增「播放条位置」行后不能再按全局下标取）。
+    const segOf = (label) => {
+      const row = [...container.querySelectorAll('.dsh-music-config-row')].find((r) => {
+        const l = r.querySelector('.dsh-music-config-label')
+        return l !== null && l.textContent === label
+      })
+      return row === undefined || row === null ? [] : [...row.querySelectorAll('.dsh-music-config-seg-btn')]
+    }
+    const fxSegs = segOf('歌词动效')
+    expect(fxSegs.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '模糊浮入', '卡拉OK'])
+    expect(fxSegs.findIndex((b) => b.classList.contains('on'))).toBe(0)
+    act(() => { fxSegs[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 卡拉OK
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const fxPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-fx'])
     expect(fxPost).toBeTruthy()
     expect(fxPost.prefs['dsh-music-lyric-fx']).toBe('karaoke')
 
     // 频谱样式分段选择器：柱状图/波形图，默认「柱状图」选中；切到「波形图」并持久化。
-    expect(segBtns.slice(4).map((b) => b.textContent)).toEqual(['柱状图', '波形图'])
-    expect(segBtns.findIndex((b) => b.textContent === '柱状图' && b.classList.contains('on'))).toBe(4)
-    act(() => { segBtns[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 波形图
+    const vizSegs = segOf('频谱样式')
+    expect(vizSegs.map((b) => b.textContent)).toEqual(['柱状图', '波形图'])
+    expect(vizSegs.findIndex((b) => b.classList.contains('on'))).toBe(0)
+    act(() => { vizSegs[1].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 波形图
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const vizPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-viz-mode'])
     expect(vizPost).toBeTruthy()
     expect(vizPost.prefs['dsh-music-viz-mode']).toBe('wave')
     expect(prefsServer['dsh-music-viz-mode']).toBe('wave')
+
+    // 播放条位置分段选择器（在系统配置最下方）：默认「输入框上方」选中（= 既有行为）；
+    // 切到「页面底部」并持久化。
+    const posSegs = segOf('播放条位置')
+    expect(posSegs.map((b) => b.textContent)).toEqual(['输入框上方', '页面底部', '悬浮可拖动'])
+    expect(posSegs.findIndex((b) => b.classList.contains('on'))).toBe(0)
+    act(() => { posSegs[1].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
+    const posPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-bar-pos'])
+    expect(posPost).toBeTruthy()
+    expect(posPost.prefs['dsh-music-bar-pos']).toBe('bottom')
+    expect(prefsServer['dsh-music-bar-pos']).toBe('bottom')
+    // 复位操作：切到悬浮模式才出现「重置位置」按钮
+    expect(container.querySelector('.dsh-music-config-btn')).toBeNull()
+    act(() => { posSegs[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const resetBtn = container.querySelector('.dsh-music-config-btn')
+    expect(resetBtn).toBeTruthy()
+    expect(resetBtn.disabled).toBe(true) // 还没拖动过 → 无可重置
+    // 这一组是系统配置的**最后一项**（落位选择与逐项显示开关不是一类，放最下方）
+    const cards = [...container.querySelectorAll('.dsh-music-config-card')]
+    expect(cards[cards.length - 1].querySelector('.dsh-music-config-label').textContent).toBe('播放条位置')
+    expect(prefsServer['dsh-music-bar-pos']).toBe('float')
+    // 切回默认，避免影响后续断言（本用例后续不再看播放条）
+    act(() => { posSegs[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(prefsServer['dsh-music-bar-pos']).toBe('dock')
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -10531,13 +10571,14 @@ describe('dsh-music-player client render smoke', () => {
     expect(ghostPost.prefs['dsh-music-lyric-panel-ghost']).toBe('0')
     expect(prefsServer['dsh-music-lyric-panel-ghost']).toBe('0')
 
-    // 歌词显示关闭 → 动效配置行联动隐藏（频谱样式选择器仍在，showViz 为开）；重新打开后恢复，
+    // 歌词显示关闭 → 动效配置行联动隐藏（频谱样式 / 播放条位置两行仍在）；重新打开后恢复，
     // 且保留刚才选的 karaoke。
-    expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(2) // 仅频谱样式
+    expect(segOf('歌词动效').length).toBe(0)
+    expect(segOf('频谱样式').length).toBe(2)
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
-    const segRestored = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segRestored.length).toBe(6)
-    expect(segRestored.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke remembered
+    const fxRestored = segOf('歌词动效')
+    expect(fxRestored.length).toBe(4)
+    expect(fxRestored.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke remembered
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
@@ -10563,14 +10604,23 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
-    const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns2.length).toBe(2) // 仅频谱样式（showViz=ON，lyric=OFF）
+    const segOf2 = (label) => {
+      const row = [...container2.querySelectorAll('.dsh-music-config-row')].find((r) => {
+        const l = r.querySelector('.dsh-music-config-label')
+        return l !== null && l.textContent === label
+      })
+      return row === undefined || row === null ? [] : [...row.querySelectorAll('.dsh-music-config-seg-btn')]
+    }
+    expect(segOf2('歌词动效').length).toBe(0)
+    expect(segOf2('频谱样式').length).toBe(2) // showViz=ON
     act(() => { toggles2[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
-    const segShown2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segShown2.length).toBe(6)
-    expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke restored
+    const fxShown2 = segOf2('歌词动效')
+    expect(fxShown2.length).toBe(4)
+    expect(fxShown2.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke restored
     // 频谱样式也在跨重启后恢复为之前选择的「波形图」。
-    expect(segShown2.findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(5)
+    expect(segOf2('频谱样式').findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(1)
+    // 播放条位置同样是 Host prefs 白名单内的键：跨重启恢复为之前选的「输入框上方」。
+    expect(segOf2('播放条位置').findIndex((b) => b.classList.contains('on'))).toBe(0)
   })
 
   it('renders the 关于 tab with version, run status, and repo info from the manifest', async () => {
@@ -12112,5 +12162,374 @@ describe('多标签页统一播放器（跨标签页唯一出声 + 状态镜像�
     expect(b.audio.currentTime).toBe(42)
     expect(b.audio.paused).toBe(false)
     expect(b.audio.muted).toBe(false)
+  })
+})
+
+// ==========================================================================
+// 播放条位置（系统配置「播放条位置」：输入框上方 / 页面底部 / 悬浮可拖动）
+// ==========================================================================
+describe('播放条显示位置', () => {
+  const barById = (id) => (registered.find((r) => r.id === id) || {}).elementFactory
+  // 每条播放条的 DOM 里 "dsh-music-bar-wrap" 出现两次（id + className），按 id 计数更准。
+  const countWraps = (html) => (html.match(/id="dsh-music-bar-wrap"/g) || []).length
+
+  // 重新引导客户端：先种 Host prefs，再 boot（与仓库其它用例同款做法）。
+  // AudioClass 透传给 bootClient，便于需要 emit 播放事件的用例注入自己的假音频元素。
+  async function bootWithPrefs(prefs, AudioClass) {
+    prefsServer = { ...(prefs || {}) }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient(AudioClass)
+    return {
+      dock: barById('music-player-bar'),
+      overlay: barById('music-player-bar-floating'),
+      panel: (registered.find((r) => r.id === 'music-player-panel') || {}).elementFactory,
+    }
+  }
+  function mount(...elements) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, ...elements)) })
+    mountedRoots.push(root)
+    return container
+  }
+  // 本组用例会把播放条真实挂载起来（effect 会动 document.documentElement 上的「让位」标记）：
+  // 结束时统一 unmount，既让 effect 清理跑掉，也避免上一条用例的树影响下一条。
+  const mountedRoots = []
+  afterEach(() => {
+    while (mountedRoots.length > 0) {
+      const root = mountedRoots.pop()
+      act(() => { root.unmount() })
+    }
+  })
+
+  it('默认（无偏好）：只有输入框上方那条渲染，浮动注册点渲染为空', async () => {
+    const { dock, overlay } = await bootWithPrefs({})
+    expect(dock).toBeTruthy()
+    expect(overlay).toBeTruthy()
+    const html = renderToString(React.createElement('div', null, dock(), overlay()))
+    expect(countWraps(html)).toBe(1)
+    expect(html).toContain('dsh-music-bar-wrap')
+    expect(html).not.toContain('dsh-music-bar-wrap bottom')
+    expect(html).not.toContain('dsh-music-bar-wrap float')
+  })
+
+  it('页面底部：改挂 shell.overlay 那条，贴窗口底边并对齐会话列，且给输入区让位', async () => {
+    const { dock, overlay, panel } = await bootWithPrefs({ 'dsh-music-bar-pos': 'bottom' })
+    // 同步渲染（renderToString 不跑 effect）：度量还没测到 → 页面底部模式下先不画
+    const ssr = renderToString(React.createElement('div', null, dock(), overlay()))
+    expect(countWraps(ssr)).toBe(0)
+    // 真实挂载：effect 跑完 → 只剩 overlay 那条，带 bottom 类 + 内联定位
+    const container = mount(dock(), overlay(), panel())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const wraps = container.querySelectorAll('#dsh-music-bar-wrap')
+    expect(wraps.length).toBe(1)                       // 互斥：同一时刻只有一条
+    const wrap = wraps[0]
+    expect(wrap.className).toContain('dsh-music-bar-wrap bottom')
+    // jsdom 里没有 DSH 的 [data-composer-seat] → 回退「视口宽」（贴底由 CSS 的 bottom:0 负责）
+    expect(wrap.style.left).toBe('0px')
+    expect(wrap.style.width).toBe(window.innerWidth + 'px')
+    expect(wrap.style.top).toBe('')
+    expect(container.querySelector('.dsh-music-bar')).toBeTruthy()
+    // 让位标记：给 DSH 输入区底座补下内边距的那条 CSS 规则靠它才生效
+    expect(document.documentElement.hasAttribute('data-dsh-music-bar-bottom')).toBe(true)
+
+    // 注入会话列（composer 底座 + 它的父级「会话头下方滚动带」）后重新测量：
+    // left/width 对齐会话列，窗口被侧边栏/右栏挤压时条也跟着对齐。
+    const band = document.createElement('div')
+    const seat = document.createElement('div')
+    seat.setAttribute('data-composer-seat', '')
+    band.appendChild(seat)
+    document.body.appendChild(band)
+    band.getBoundingClientRect = () => ({ left: 260, top: 76, right: 1160, bottom: 700, width: 900, height: 624 })
+    act(() => { window.dispatchEvent(new Event('resize')) })
+    expect(wrap.style.left).toBe('260px')
+    expect(wrap.style.width).toBe('900px')
+    band.remove()
+
+    // 切回「输入框上方」：让位标记必须摘掉（否则输入区会一直多出 44px 下内边距），
+    // 且浮动那条立刻退出、改由输入框上方那条接管——同一时刻仍然只有一条。
+    act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const posRow = [...container.querySelectorAll('.dsh-music-config-row')].find((r) => {
+      const l = r.querySelector('.dsh-music-config-label')
+      return l !== null && l.textContent === '播放条位置'
+    })
+    act(() => { posRow.querySelectorAll('.dsh-music-config-seg-btn')[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.documentElement.hasAttribute('data-dsh-music-bar-bottom')).toBe(false)
+    const after = container.querySelectorAll('#dsh-music-bar-wrap')
+    expect(after.length).toBe(1)
+    expect(after[0].className).not.toContain('bottom')
+  })
+
+  it('CSS 回归：「播放条背景显示」关掉时 bare 规则必须真的生效（含新落位规则的 bare 排除）', async () => {
+    // 这条规则曾在改动中被 // 注释吞掉（规则整条不进样式表），表现为「配置项失效：
+    // 关不掉边框和背景」；另外落位规则的背景选择器比 .dsh-music-bar.bare 更具体，
+    // 不排除 bare 同样会把开关压掉——两种都在这条用例里锁住。
+    const { dock, overlay } = await bootWithPrefs({ 'dsh-music-bar-pos': 'float', 'dsh-music-show-bar-bg': '0' })
+    const container = mount(dock(), overlay())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar').className).toContain('bare')
+    const css = [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    expect(css).toContain('.dsh-music-bar.bare { background: transparent; border: none; }')
+    expect(css).toMatch(/\.dsh-music-bar-wrap\.bottom \.dsh-music-bar:not\(\.bare\)/)
+    expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar:not\(\.bare\)/)
+    // 反向保护：落位规则里不允许再出现不排除 bare 的背景/阴影写法
+    expect(css).not.toMatch(/\.dsh-music-bar-wrap\.(?:bottom|float) \.dsh-music-bar\s*{[^}]*background/)
+  })
+
+  it('CSS 回归：源码里没有把 CSS 字符串写进 // 注释行（会让该条规则静默失效）', () => {
+    const src = readFileSync(resolve(process.cwd(), 'lib/client.js'), 'utf8')
+    const swallowed = src.split('\n').filter((l) => /^\s*\/\//.test(l) && /'\.dsh-music/.test(l))
+    expect(swallowed).toEqual([])
+  })
+
+  it('悬浮条：歌词独占整行（不再被歌名挤窄），且鼠标移上去不会消失', async () => {
+    // 回归：歌词原先与歌名共处一行、max-width 46%，歌名（含歌手/音质徽章）一挤，
+    // 中文歌词几乎每句都被截断；另外 dock 时代「悬停收起歌词」的规则会把悬浮条上
+    // 的歌词一起弄没——歌词独占一行 + 常驻显示，两处都在这条用例里锁住。
+    const { dock, overlay } = await bootWithPrefs({
+      'dsh-music-bar-pos': 'float',
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    })
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'local',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 40, text: '第三句歌词够长一点' }],
+    }
+    try {
+      vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+      await bootClient()
+      const container = mount(barById('music-player-bar')(), barById('music-player-bar-floating')())
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('第三句歌词够长一点')
+      // 独占整行：flex-basis 100% 且不参与同行挤压；旧的 46% 上限必须已去掉
+      const css = [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+      expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-lyric \{[^}]*flex: 1 0 100%/)
+      expect(css).not.toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-lyric \{[^}]*max-width: 46%/)
+      // 行序：歌词(0) → 歌名(1) → 频谱(2) → 控件(3)——歌词在第一行
+      expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-lyric \{[^}]*order: 0/)
+      expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-name \{[^}]*order: 1/)
+      expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-viz \{[^}]*order: 2/)
+      expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-controls \{[^}]*order: 3/)
+      // 鼠标移入播放条（热区 mouseover）→ dock 下歌词会收起，悬浮条上必须还在
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+      expect(hotspot).toBeTruthy()
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(container.querySelector('.dsh-music-bar-controls').className).toContain('on')
+      expect(container.querySelector('.dsh-music-bar-lyric')).toBeTruthy()
+    } finally {
+      lyricFixture = null
+    }
+  })
+
+  it('悬浮可拖动：三行紧凑布局（控件常显、不画频谱），按记忆坐标定位', async () => {
+    const { dock, overlay } = await bootWithPrefs({
+      'dsh-music-bar-pos': 'float',
+      'dsh-music-bar-float-pos': JSON.stringify({ x: 180, y: 240 }),
+    })
+    const container = mount(dock(), overlay())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(1)
+    const wrap = container.querySelector('#dsh-music-bar-wrap')
+    expect(wrap.className).toContain('dsh-music-bar-wrap float')
+    expect(wrap.style.left).toBe('180px')
+    expect(wrap.style.top).toBe('240px')
+    expect(wrap.style.right).toBe('auto')  // 有坐标时必须清掉贴边，否则左右同时生效会被拉宽
+    expect(wrap.style.bottom).toBe('auto')
+    // 悬浮条：控件组常显（小条上没法靠悬停滑出），且不渲染频谱画布
+    expect(container.querySelector('.dsh-music-bar-controls').className).toContain('on')
+    expect(container.querySelector('.dsh-music-viz')).toBeNull() // 无播放内容本来就没有画布
+    // 频谱在悬浮条里必须能显示：CSS 不再隐藏它，而是排到第一行（歌名右侧）
+    const cssOf = () => [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    expect(cssOf()).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-viz \{[^}]*order: 2/)
+    expect(cssOf()).not.toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-viz \{[^}]*display: none/)
+    // 宽度下限：第三行 = 时长 ~75px + 8 个 24px 圆钮 + 7×8px 间距 + 内边距 ≈ 351px，
+    // 再窄就会把控制按钮裁掉（.dsh-music-bar-btns 是 overflow:hidden）。
+    const css = [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    const w = css.match(/\.dsh-music-bar-wrap\.float \.dsh-music-bar \{[^}]*width: (\d+)px/)
+    expect(w).toBeTruthy()
+    expect(Number(w[1])).toBeGreaterThanOrEqual(360)
+    // 非页面底部模式不该留下「让位」标记（否则输入区会凭空多出下内边距）
+    expect(document.documentElement.hasAttribute('data-dsh-music-bar-bottom')).toBe(false)
+  })
+
+  it('悬浮条：播放时照常显示频谱（贴歌名右侧），不再被隐藏', async () => {
+    // 回归：悬浮条最初把频谱 display:none 掉了——「频谱/歌词」是播放条的两大信息，
+    // 悬浮位置不该丢功能。
+    const audios = []
+    class RecAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const { dock, overlay, panel } = await bootWithPrefs({ 'dsh-music-bar-pos': 'float' }, RecAudio)
+    const container = mount(dock(), overlay(), panel())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 起播一首：点开面板 → 点曲目 → 触发 play 事件（playing=true 才会挂画布）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { audios[0].emit('play') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const viz = container.querySelector('.dsh-music-viz')
+    expect(viz).toBeTruthy()
+    expect(viz.width).toBe(60)
+    // 关键：暂停时画布**仍要挂着**（只是画空），否则画布一进一出会让第三行控制条上下漂移
+    act(() => { audios[0].emit('pause') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-viz')).toBeTruthy()
+    act(() => { audios[0].emit('play') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 与歌名同处第一行（order 0 名称 / 1 频谱），且不再有 display:none
+    const css = [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-viz \{[^}]*order: 2; flex: none/)
+    // 歌名不伸长（flex: 0 1 auto）→ 频谱紧跟歌名/音质徽章，不会被推到行尾
+    expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-name \{[^}]*flex: 0 1 auto/)
+    expect(css).not.toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-name \{[^}]*flex: 1 1 auto/)
+    // 歌名宽度上限预留出频谱的位置（60px + 8px）：否则长歌名会把频谱挤到自己独占一行，
+    // 条会从三行变四行（换行按理想宽度算，不受 flex-shrink 影响）
+    expect(css).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-name \{[^}]*max-width: calc\(100% - 72px\)/)
+    expect(css).not.toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-viz \{[^}]*display: none/)
+  })
+
+  it('悬浮条：固定三行——没有歌词时用空占位撑住同一行，高度不跳', async () => {
+    // 回归：歌词行原先「有词才占位」，于是纯音乐/未出字幕时条会矮一行，
+    // 一首歌播到有词/无词之间切换时高度来回跳，很打断视线。
+    const cssOf = () => [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    const playbackPrefs = {
+      'dsh-music-bar-pos': 'float',
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    }
+    // ① 无歌词：占位行在，且带 -empty 标记
+    lyricFixture = { ok: true, hasLrc: false }
+    try {
+      const { dock, overlay } = await bootWithPrefs(playbackPrefs)
+      const container = mount(dock(), overlay())
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = container.querySelector('.dsh-music-bar-lyric')
+      expect(row).toBeTruthy()
+      expect(row.className).toContain('dsh-music-bar-lyric-empty')
+      expect(row.textContent).toBe('')
+    } finally { lyricFixture = null }
+
+    // ② 有歌词：同一行放真歌词（不带 -empty），行高由 CSS 固定 → 两者高度一致
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'local',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 40, text: '第三句歌词够长一点' }],
+    }
+    try {
+      const { dock, overlay } = await bootWithPrefs(playbackPrefs)
+      const container = mount(dock(), overlay())
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = container.querySelector('.dsh-music-bar-lyric')
+      expect(row).toBeTruthy()
+      expect(row.className).not.toContain('-empty')
+      expect(row.textContent).toContain('第三句歌词够长一点')
+    } finally { lyricFixture = null }
+
+    // 行高写死在 CSS 上（min-height + line-height 都是 20px），有无内容都一样高
+    expect(cssOf()).toMatch(/\.dsh-music-bar-wrap\.float \.dsh-music-bar-lyric \{[^}]*min-height: 20px; line-height: 20px/)
+  })
+
+  it('悬浮条：鼠标移入变不透明、移出按「沉浸感」变淡（与 dock 同款行为）', async () => {
+    // 回归：悬浮条把右端热区 display:none 掉了，而 barHover 只由那个热区驱动，
+    // 于是条的透明度永远停在「沉浸感」配置值上、鼠标移入也不会变亮。
+    // 需要一条「曲目已恢复但没在播」的状态：dock 规则下无内容时恒定为工作态（不透明度 100%），
+    // 只有有曲目且没悬停时才走「沉浸感」变淡这一路。
+    const { dock, overlay } = await bootWithPrefs({
+      'dsh-music-bar-pos': 'float',
+      'dsh-music-immerse': '0.4',
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    })
+    const container = mount(dock(), overlay())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const wrap = container.querySelector('#dsh-music-bar-wrap')
+    const barEl = container.querySelector('.dsh-music-bar')
+    // 闲置态：带 dimmed，透明度 = 1 − 沉浸感 = 0.6
+    expect(barEl.classList.contains('dimmed')).toBe(true)
+    expect(barEl.style.getPropertyValue('--dsh-music-immerse')).toBe('0.6')
+    vi.useFakeTimers()
+    try {
+      // 移入整条 → 完全不透明
+      act(() => { wrap.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      // 移出 → 1s 延迟内保持不透明（防误移出），到点才回到配置值
+      act(() => { wrap.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      act(() => { vi.advanceTimersByTime(1100) })
+      expect(barEl.classList.contains('dimmed')).toBe(true)
+    } finally { vi.useRealTimers() }
+    // 悬浮模式下控件行不再自己排「变淡」（否则鼠标在条内移动就会误触发）
+    const css = [...document.querySelectorAll('style')].map((s) => s.textContent || '').join('\n')
+    expect(css).toMatch(/\.dsh-music-bar\.dimmed \{ opacity: var\(--dsh-music-immerse, 0\.5\); \}/)
+  })
+
+  it('悬浮条拖动：过阈值才移动并落盘坐标，拖动后的那次点击被吞掉；重置位置可清掉坐标', async () => {
+    const { dock, overlay, panel } = await bootWithPrefs({
+      'dsh-music-bar-pos': 'float',
+      'dsh-music-bar-float-pos': JSON.stringify({ x: 100, y: 100 }),
+    })
+    const container = mount(dock(), overlay(), panel())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const wrap = container.querySelector('#dsh-music-bar-wrap')
+    // 空闲态（没有曲目）显示的是 .dsh-music-bar-idle，单击同样打开面板——正好用来验「拖动后吞掉点击」。
+    const grabEl = container.querySelector('.dsh-music-bar-idle')
+    expect(grabEl).toBeTruthy()
+    const pointer = (type, x, y) => {
+      const ev = new Event(type, { bubbles: true })
+      ev.clientX = x; ev.clientY = y; ev.button = 0; ev.pointerId = 1
+      return ev
+    }
+    const panelEl = () => container.querySelector('.dsh-music-panel')
+    expect(panelEl().style.display).toBe('none')
+
+    // 单击（没有拖动）→ 打开面板
+    act(() => { grabEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(panelEl().style.display).toBe('')
+    act(() => { grabEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 收起
+    expect(panelEl().style.display).toBe('none')
+
+    // 未过阈值（<4px）不移动：坐标保持原值
+    act(() => { grabEl.dispatchEvent(pointer('pointerdown', 300, 300)) })
+    act(() => { grabEl.dispatchEvent(pointer('pointermove', 301, 301)) })
+    act(() => { grabEl.dispatchEvent(pointer('pointerup', 301, 301)) })
+    expect(wrap.style.left).toBe('100px')
+    expect(wrap.style.top).toBe('100px')
+
+    // 过阈值拖动 → 坐标 = 元素当前左上角 + 位移（jsdom 无布局，rect 恒为 0，故按 rect 推算）
+    const before = wrap.getBoundingClientRect()
+    act(() => { grabEl.dispatchEvent(pointer('pointerdown', 300, 300)) })
+    act(() => { grabEl.dispatchEvent(pointer('pointermove', 420, 380)) })
+    expect(wrap.style.left).toBe(Math.round(before.left + 120) + 'px')
+    expect(wrap.style.top).toBe(Math.round(before.top + 80) + 'px')
+    act(() => { grabEl.dispatchEvent(pointer('pointerup', 420, 380)) })
+    // 拖动结束补发的那次 click 必须被吞掉：否则一拖就把面板拽出来
+    act(() => { grabEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(panelEl().style.display).toBe('none')
+    // 之后正常单击仍然可用（抑制标记只吃一次）
+    act(() => { grabEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(panelEl().style.display).toBe('')
+    // 坐标已写进 Host prefs（800ms 防抖后落盘）
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(prefsServer['dsh-music-bar-float-pos'])
+      .toBe(JSON.stringify({ x: Math.round(before.left + 120), y: Math.round(before.top + 80) }))
+
+    // 配置页「重置位置」：清掉记忆坐标 → 回到默认贴右下角（无内联 left/top）
+    act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const resetBtn = container.querySelector('.dsh-music-config-btn')
+    expect(resetBtn).toBeTruthy()
+    expect(resetBtn.disabled).toBe(false)      // 有坐标 → 可重置
+    act(() => { resetBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(wrap.style.left).toBe('')
+    expect(wrap.style.top).toBe('')
+    expect(prefsServer['dsh-music-bar-float-pos']).toBeUndefined()
   })
 })
