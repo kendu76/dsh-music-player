@@ -9,7 +9,7 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React, { act } from 'react'
 import { renderToString } from 'react-dom/server'
 import { createRoot } from 'react-dom/client'
@@ -11890,5 +11890,227 @@ describe('news pane（新闻播报页签）', () => {
       expect(newsFailuresServer.length).toBe(0) // mock 端已清空
       expect(container.querySelector('.dsh-music-news-failure')).toBeNull() // 展示同步消失
     } finally { }
+  })
+})
+
+// ==========================================================================
+// 多标签页统一播放器（跨标签页唯一出声 + 播放态镜像）
+// ==========================================================================
+// jsdom 没有 BroadcastChannel。这里注入一个最小 hub：同一 hub 上的所有实例互投消息、
+// 不回投自己（与规范一致），另有 inject() 用来模拟「某页已经关闭、bye 没能送到」。
+function installXtabHub() {
+  const channels = new Set()
+  const seen = []
+  class FakeBroadcastChannel {
+    constructor(name) {
+      this.name = name
+      this.listeners = []
+      this.closed = false
+      channels.add(this)
+    }
+    addEventListener(type, fn) { if (type === 'message') this.listeners.push(fn) }
+    removeEventListener(type, fn) { this.listeners = this.listeners.filter((f) => f !== fn) }
+    postMessage(data) {
+      seen.push(data)
+      for (const c of [...channels]) {
+        if (c === this || c.closed) continue
+        for (const fn of c.listeners) fn({ data })
+      }
+    }
+    close() { this.closed = true; channels.delete(this) }
+  }
+  return {
+    Ctor: FakeBroadcastChannel,
+    seen,
+    inject: (data) => { for (const c of [...channels]) { if (c.closed) continue; for (const fn of c.listeners) fn({ data }) } },
+  }
+}
+
+describe('多标签页统一播放器（跨标签页唯一出声 + 状态镜像）', () => {
+  let prevBC
+  afterEach(() => {
+    // vi.stubGlobal 会跨用例残留：这里手工恢复（否则后续用例会被注入 BroadcastChannel，
+    // 走进跨页路径）。直接挂在 globalThis 上，退出时删掉/还原。
+    if (prevBC === undefined) { try { delete globalThis.BroadcastChannel } catch (e) {} }
+    else globalThis.BroadcastChannel = prevBC
+    prevBC = undefined
+  })
+
+  // 引导两个「标签页」：各有一份 client 模块实例（各自 store/audio/React 树），
+  // 共享同一份 Host 数据（manifest / prefs），并通过注入的 BroadcastChannel 互投消息。
+  async function bootTwoTabs(intentRef) {
+    const audios = []
+    const intervals = [] // 每个实例 apply() 期间注册的所有 setInterval 回调
+    class TabAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => (String(url) === '/dsh-music/intent' ? jsonRes(intentRef.get()) : baseFetch(url, opts))
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', TabAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intervals.push(cb); return intervals.length })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    const hub = installXtabHub()
+    prevBC = globalThis.BroadcastChannel
+    globalThis.BroadcastChannel = hub.Ctor
+    await import('../lib/client.js')
+    const regs = []
+    const polls = []
+    for (let i = 0; i < 2; i++) {
+      const reg = []
+      const slots = {
+        inject: (n, cb) => cb(),
+        register: (meta, ef) => { reg.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      const ex = factory((name) => (name === 'react' ? React : undefined))
+      ex.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      // 该实例 apply() 期间最后注册的定时器 = /dsh-music/intent 轮询
+      // （前面还有多标签页心跳，故不能按下标取）。
+      polls.push(intervals[intervals.length - 1])
+      regs.push(reg)
+    }
+    await new Promise((r) => setTimeout(r, 0))
+    // 每个实例固定创建 2 个 Audio（audio、preAudio），故主元素是 audios[0] 与 audios[2]。
+    return { a: { audio: audios[0], reg: regs[0] }, b: { audio: audios[2], reg: regs[1] }, polls, hub }
+  }
+
+  function renderBar(tab) {
+    const bar = tab.reg.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar)) })
+    return container
+  }
+  const barName = (c) => (c.querySelector('.dsh-music-bar-name-text') || {}).textContent || ''
+  const iconPath = (c) => {
+    const btn = c.querySelector('.dsh-music-bar-btn[title="播放/暂停"]')
+    return btn === null ? '' : (btn.querySelector('path') || {}).getAttribute('d')
+  }
+  const PLAY_D = 'M8 5v14l11-7z'
+  const PAUSE_D = 'M6 19h4V5H6v14zm8-14v14h4V5h-4z'
+
+  function twoTracks() {
+    manifest.tracks = [
+      { id: '0', name: 'alpha.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/alpha.mp3' },
+      { id: '1', name: 'beta.mp3', url: '/dsh-music/1', size: 10, ext: 'mp3', path: '/music/beta.mp3' },
+    ]
+  }
+
+  it('A 页在播时 B 页点播：出声权转移，A 页立即静音且两页显示同一个播放器', async () => {
+    twoTracks()
+    let intent = { action: 'play', id: '0' }
+    const { a, b, polls, hub } = await bootTwoTabs({ get: () => intent })
+    const ca = renderBar(a); const cb = renderBar(b)
+
+    // A 页起播第一首 → 认领唯一出声权
+    await act(async () => { polls[0](); await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { a.audio.emit('play') })
+    expect(a.audio.paused).toBe(false)
+    expect(a.audio.muted).toBe(false)
+    expect(barName(ca)).toContain('alpha')
+    expect(hub.seen.some((m) => m.t === 'claim')).toBe(true)
+
+    // B 页镜像：不出声、只同步显示同一个播放器
+    expect(b.audio.paused).toBe(true)
+    expect(b.audio.muted).toBe(true)
+    expect(barName(cb)).toContain('alpha')
+    expect(iconPath(cb)).toBe(PAUSE_D) // 镜像页也显示成「正在播放」
+    const badge = cb.querySelector('.dsh-music-bar-xout')
+    expect(badge).toBeTruthy()
+    expect(badge.textContent).toBe('此页静音')
+    expect(ca.querySelector('.dsh-music-bar-xout')).toBeNull() // 出声页不显示该徽标
+
+    // B 页点播另一首（例：agent 的播放意图落到了 B 页）→ 转发给 A 执行
+    intent = { action: 'play', id: '1' }
+    await act(async () => { polls[1](); await new Promise((r) => setTimeout(r, 0)) })
+    expect(a.audio.src).toContain('/dsh-music/1')
+    expect(a.audio.paused).toBe(false)
+    expect(b.audio.paused).toBe(true)
+    expect(b.audio.muted).toBe(true)
+    // 两页显示同一曲目
+    expect(barName(ca)).toContain('beta')
+    expect(barName(cb)).toContain('beta')
+  })
+
+  it('镜像页的播放/暂停转发给出声页（本页永不起播）', async () => {
+    twoTracks()
+    const intent = { action: 'play', id: '0' }
+    const { a, b, polls } = await bootTwoTabs({ get: () => intent })
+    const ca = renderBar(a); const cb = renderBar(b)
+    await act(async () => { polls[0](); await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { a.audio.emit('play') })
+    expect(iconPath(ca)).toBe(PAUSE_D)
+
+    // B 页点暂停 → 指令发给 A → A 的元素真的暂停了
+    act(() => { cb.querySelector('.dsh-music-bar-btn[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(a.audio.paused).toBe(true)
+    expect(b.audio.paused).toBe(true)
+    expect(b.audio.muted).toBe(true)
+    await act(async () => { a.audio.emit('pause') })
+    // 镜像页跟着显示成暂停态（同一个播放器）
+    expect(iconPath(cb)).toBe(PLAY_D)
+
+    // B 页再点播放 → 仍由 A 出声（B 自己没有起播）
+    act(() => { cb.querySelector('.dsh-music-bar-btn[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(a.audio.paused).toBe(false)
+    expect(b.audio.paused).toBe(true)
+    expect(b.audio.muted).toBe(true)
+  })
+
+  it('心跳保活：出声页暂停空闲超过 TTL 时，镜像页的操作仍转发给它（不误判成已关页）', async () => {
+    twoTracks()
+    const intent = { action: 'play', id: '0' }
+    const { a, b, polls, hub } = await bootTwoTabs({ get: () => intent })
+    const cb = renderBar(b)
+    await act(async () => { polls[0](); await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { a.audio.emit('play') })
+    const ownerId = hub.seen.find((m) => m.t === 'claim').id
+
+    // 时间推过 TTL：只有收到心跳，出声页才算还活着（真实浏览器里心跳每 2s 一次）
+    const realNow = Date.now
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow.call(Date) + 8000)
+    try {
+      act(() => { hub.inject({ t: 'ping', id: ownerId }) })
+      act(() => { cb.querySelector('.dsh-music-bar-btn[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(a.audio.paused).toBe(true) // 指令确实到了出声页（它暂停了）
+      expect(b.audio.paused).toBe(true) // 镜像页没有自己起播
+    } finally { spy.mockRestore() }
+  })
+
+  it('出声页关闭后：另一页解除镜像，可就地从最后位置续播', async () => {
+    twoTracks()
+    const intent = { action: 'play', id: '0' }
+    const { a, b, polls, hub } = await bootTwoTabs({ get: () => intent })
+    const cb = renderBar(b)
+    await act(async () => { polls[0](); await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { a.audio.emit('play') })
+    expect(barName(cb)).toContain('alpha')
+
+    // A 页播到 42s：position 是节流广播，等过一次节流窗
+    a.audio.currentTime = 42
+    act(() => { a.audio.emit('timeupdate') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 320)) })
+
+    // A 页关闭（bye）→ B 页解除镜像态、状态停在最后位置
+    const ownerId = hub.seen.find((m) => m.t === 'claim').id
+    act(() => { hub.inject({ t: 'bye', id: ownerId }) })
+    expect(cb.querySelector('.dsh-music-bar-xout')).toBeNull()
+    expect(iconPath(cb)).toBe(PLAY_D)
+
+    // B 页按 ▶ → 就地接管，从 42s 续播（而不是回到 0，也不是没声音）
+    act(() => { cb.querySelector('.dsh-music-bar-btn[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(b.audio.src).toContain('/dsh-music/0')
+    expect(b.audio.currentTime).toBe(42)
+    expect(b.audio.paused).toBe(false)
+    expect(b.audio.muted).toBe(false)
   })
 })
