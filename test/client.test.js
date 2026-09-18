@@ -57,6 +57,48 @@ function makePlaylist(id, name, fixed, paths) {
 function jsonRes(obj) {
   return Promise.resolve({ ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) })
 }
+// 覆盖 document.visibilityState（jsdom 里是只读原型访问器，实例上可重定义）。
+// 用于验证「熄屏/锁屏 → 不自动起播」的守卫；返回 setter 与 restore。
+function stubVisibilityState(initial) {
+  const prev = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  let value = initial
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value })
+  return {
+    set(next) { value = next },
+    restore() {
+      if (prev) Object.defineProperty(document, 'visibilityState', prev)
+      else delete document.visibilityState
+    },
+  }
+}
+// 覆盖 navigator.wakeLock（jsdom 未实现 Screen Wake Lock）：记录每次 request 的
+// sentinel，供「播放期防熄屏锁」用例断言申请次数。release() 会派发 release 事件，
+// 与真实 sentinel 一致（客户端据此把持有的锁置空）。
+function stubWakeLock() {
+  const prev = Object.getOwnPropertyDescriptor(navigator, 'wakeLock')
+  const requests = []
+  Object.defineProperty(navigator, 'wakeLock', {
+    configurable: true,
+    value: {
+      request: () => {
+        const listeners = {}
+        const sentinel = {
+          addEventListener(t, fn) { (listeners[t] = listeners[t] || []).push(fn) },
+          release() { (listeners.release || []).forEach((fn) => fn()) },
+        }
+        requests.push(sentinel)
+        return Promise.resolve(sentinel)
+      },
+    },
+  })
+  return {
+    requests,
+    restore() {
+      if (prev) Object.defineProperty(navigator, 'wakeLock', prev)
+      else delete navigator.wakeLock
+    },
+  }
+}
 // 与客户端一致：字幕行长度按「去标点后的字数」计（标点不计入）。
 const subPunct = '，。！？…：；、“”‘’（）《》—～·`~!@#$%^&*()-_=+[]{};\':",.<>/?\\|'
 const subContentLen = (s) => [...String(s)].filter((c) => !subPunct.includes(c) && !/\s/.test(c)).length
@@ -11329,6 +11371,204 @@ describe('news pane（新闻播报页签）', () => {
     expect(audio.src).not.toContain('/dsh-music/news/')
     expect(textFetches.some((u) => u.includes('/dsh-music/book/b1/text?from=2'))).toBe(true)
     expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('测试小说')
+  })
+
+  it('新闻自动播报守卫：页面不可见（熄屏/锁屏）时不自动起播，只刷新列表并保持「待播」', async () => {
+    // 回归：定时任务在熄屏期间推送 news 播放意图时，会把整期对着空房间播完，并在
+    // 块与块之间反复申请/释放 screen wake lock（音频设备跟着进出低功耗态），解锁
+    // 瞬间就是那几声「咚咚」。现在：不可见 → 只拉一次期次列表（面板仍显示「待播」），
+    // 不碰 <audio>、不标记已播；解锁后再推送同一意图才起播。
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    prefsServer = {}
+    const audios = []
+    class GuardAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    let listFetches = 0
+    const playedPosts = []
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/intent') return jsonRes(intent)
+      if (u === '/dsh-music/news') listFetches++
+      if (u === '/dsh-music/news/played') playedPosts.push(opts && opts.body)
+      return baseFetch(url, opts)
+    }
+    const vis = stubVisibilityState('hidden')
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', GuardAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+
+      // 熄屏/锁屏期间意图到达 → 不起播
+      intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+      await act(async () => { await intentPoll() })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(String(audio.src)).not.toContain('/dsh-music/news/')
+      expect(audio.paused).toBe(true)
+      expect(listFetches).toBeGreaterThan(0) // 列表已刷新（面板据此显示「待播」徽标）
+      expect(playedPosts.length).toBe(0)     // 未标记已播 → 仍是「待播」
+
+      // 解锁/回到前台后再推送同一意图 → 正常起播（守卫是唯一差别）
+      vis.set('visible')
+      intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+      await act(async () => { await intentPoll() })
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+      expect(String(audio.src)).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    } finally {
+      vis.restore()
+    }
+  })
+
+  it('新闻自动播报守卫：渲染帧停摆（macOS 熄屏时 visibilityState 仍是 visible）同样推迟', async () => {
+    // macOS 熄屏/锁屏时 Chrome 不会把页面置为 hidden（锁屏后网页还能继续放音），
+    // 但合成器停发帧 → rAF 停摆。守卫的第二个信号必须兜住这条路径。
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    prefsServer = {}
+    const audios = []
+    class StallAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    let rafCb = null
+    let fakeNow = Date.now()
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => (String(url) === '/dsh-music/intent' ? jsonRes(intent) : baseFetch(url, opts))
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', StallAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    let nowSpy = null
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
+
+      // 熄屏 6 秒没有帧（合成器停了）→ framesStalled() 成立 → 不起播
+      fakeNow += 6000
+      intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+      await act(async () => { await intentPoll() })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(String(audio.src)).not.toContain('/dsh-music/news/')
+      expect(audio.paused).toBe(true)
+
+      // 解锁：合成器恢复发帧（下一次 rAF 回调到达）→ 心跳重置 → 再推送即起播
+      fakeNow += 1000
+      act(() => { if (rafCb !== null) rafCb() })
+      intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+      await act(async () => { await intentPoll() })
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+      expect(String(audio.src)).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    } finally {
+      if (nowSpy !== null) nowSpy.mockRestore()
+    }
+  })
+
+  it('播放期 screen wake lock：页面不可见或渲染帧停摆时不申请（恢复后照常申请）', async () => {
+    // 播放期申请 screen wake lock 是为了「听的时候别熄屏」；但熄屏/锁屏时申请毫无
+    // 意义（点不亮屏幕），反而让系统与音频设备在低功耗与防熄屏之间反复切换——
+    // pmset 里那串每 20~45 秒一次的 Blink Wake Lock 创建/释放就是这么来的。
+    manifest = {
+      ...baseManifest(),
+      tracks: [{ id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' }],
+      count: 1,
+    }
+    prefsServer = {}
+    const audios = []
+    class LockAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    let fakeNow = Date.now()
+    const wl = stubWakeLock()
+    const vis = stubVisibilityState('visible')
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => (String(url) === '/dsh-music/intent' ? jsonRes(intent) : baseFetch(url, opts))
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LockAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    let nowSpy = null
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
+
+      // 可见 + 播放 → 申请一把
+      intent = { action: 'play', id: '0', name: 'a.mp3' }
+      await act(async () => { await intentPoll() })
+      await new Promise((r) => setTimeout(r, 0))
+      act(() => { audio.emit('play') })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(wl.requests.length).toBe(1)
+
+      // 熄屏/锁屏（hidden）：pause 释放后再 play 不再申请
+      vis.set('hidden')
+      act(() => { audio.emit('pause') })
+      act(() => { audio.emit('play') })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(wl.requests.length).toBe(1)
+
+      // 回到前台：重新申请
+      vis.set('visible')
+      act(() => { audio.emit('pause') })
+      act(() => { audio.emit('play') })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(wl.requests.length).toBe(2)
+
+      // 渲染帧停摆（macOS 熄屏：visibilityState 仍是 visible）→ 同样不申请
+      act(() => { audio.emit('pause') })
+      fakeNow += 6000
+      act(() => { audio.emit('play') })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(wl.requests.length).toBe(2)
+    } finally {
+      if (nowSpy !== null) nowSpy.mockRestore()
+      wl.restore()
+      vis.restore()
+    }
   })
 
   it('新闻列表：点击整行任意位置都进详情；行内按钮不误触导航', async () => {
