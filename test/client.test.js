@@ -566,6 +566,52 @@ describe('dsh-music-player client render smoke', () => {
     expect(prefsServer['dsh-music-mode']).toBe('single')
   })
 
+  it('音量条滚轮调速：慢速滚动每次 1%、快速滚动每次 5%，上滚加、下滚减', async () => {
+    prefsServer = { 'dsh-music-volume': '0.5', 'dsh-music-mode': 'order' }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar)) })
+
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    expect(volBtn).toBeTruthy()
+    // 音量弹层 portal 到 body，而 beforeEach 不清 body：历史用例渲染过的音量条节点还留在
+    // body 里。这里用「打开弹层前后的差集」定位本用例新渲染的那一个，而不是按出现顺序取
+    // 第几个——顺序依赖在别的用例增删后会变脆。
+    const seen = new Set(document.querySelectorAll('.dsh-music-vol-slider'))
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const slider = () => [...document.querySelectorAll('.dsh-music-vol-slider')].find((n) => !seen.has(n))
+    expect(slider()).toBeTruthy()
+    expect(slider().title).toBe('音量 50%')
+
+    // 滚一次滚轮，返回「这次事件是否被 preventDefault」与滚动后的音量标题
+    const wheel = (deltaY) => {
+      const ev = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true })
+      act(() => { slider().dispatchEvent(ev) })
+      return { prevented: ev.defaultPrevented, title: slider().title }
+    }
+
+    // 慢速：与上一次间隔极远、单次量也不大 → 1%（上滚加音量；这次滚轮被音量条吃掉，
+    // 不再冒泡去滚动外层对话）
+    const slow = wheel(-100)
+    expect(slow.prevented).toBe(true)
+    expect(slow.title).toBe('音量 51%')
+
+    // 快速：紧接上一次（间隔 < 80ms）且单次量够大 → 5%
+    expect(wheel(-100).title).toBe('音量 56%')
+
+    // 触控板细碎滚动：间隔同样很小，但单次量只有 3 → 仍按慢速 1%
+    expect(wheel(-3).title).toBe('音量 57%')
+
+    // 下滚减音量：先等到间隔超过快速阈值 → 慢速 1%
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)) })
+    expect(wheel(100).title).toBe('音量 56%')
+  })
+
   it('restores the last played track and QQ search history from the Host prefs after restart', async () => {
     // Real-world scenario: the Host file has a saved playback entry + QQ search
     // history. A fresh page load must restore both (bar shows the track, the
