@@ -7956,6 +7956,99 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.querySelector('.dsh-music-bar-btn.fav.on')).toBeTruthy()
   })
 
+  it('QQ 登录失效后重新登录：面板顶部那条红色报错随登录成功消失（不必等播歌）', async () => {
+    // 回归：登录失效时引擎 markOnlineAuthFailed() 会 set({ error: '…请重新登录' })（面板顶部
+    // 的红条）+ 把面板切回登录 UI；重新扫码登录成功后红条仍在，只有播放歌曲（onPlay 里
+    // set({ error: null })）才会消失。现在「重新登录成功」本身就会清掉这条陈旧报错。
+    qqLoggedIn = false
+    manifest = { ...baseManifest(), qqLoggedIn: false, qqAuthExpired: true, error: 'QQ音乐无法播放（可能是登录已失效），请重新登录' }
+    prefsServer = {}
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/qq/login/start') return jsonRes({ ok: true, key: 'type=qq&uuid=U&state=S', image: 'data:image/jpeg;base64,xxx', mode: 'qq' })
+      if (u.includes('/dsh-music/qq/login/check')) return jsonRes({ ok: true, status: 'success', uin: '123456', nickname: '我', loginFrom: 'qq' })
+      return fetchStub(u, opts)
+    }))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // ① 陈旧报错挂在面板顶部（Q0Q 页签下也照显示：s.error 的渲染与页签无关），且面板在登录 UI
+    const banner = container.querySelector('.dsh-music-error')
+    expect(banner).toBeTruthy()
+    expect(banner.textContent).toContain('请重新登录')
+    const qqBtn = [...container.querySelectorAll('.dsh-music-qq-login-btn')].find((b) => b.textContent === 'QQ 登录')
+    expect(qqBtn).toBeTruthy()
+
+    // ② 重新扫码登录成功 → 红条必须消失（这里刻意不播歌）
+    vi.useFakeTimers()
+    try {
+      act(() => { qqBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      act(() => { vi.advanceTimersByTime(2000) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    } finally { vi.useRealTimers() }
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-error')).toBeNull()
+  })
+
+  it('QQ 收藏失败后再试成功：面板顶部那条红色报错立刻消失（无需登录/播歌）', async () => {
+    // 自愈：失败留下的报错原先只由「播放」清，重试成功却不清 → 红条一直挂着，像是还在失败。
+    qqLoggedIn = true
+    let favOk = false
+    prefsServer = {}
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/qq/fav' && opts && opts.method === 'POST') {
+        return jsonRes(favOk ? { ok: true, faved: true } : { ok: false, error: '登录已过期，请重新登录' })
+      }
+      return fetchStub(u, opts)
+    }))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const plRow = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { plRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('七里香'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // ① 收藏失败 → 面板顶部出现红条
+    const heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart).toBeTruthy()
+    act(() => { heart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-error').textContent).toContain('登录已过期')
+
+    // ② 再点一次（这次成功）→ 红条立刻消失
+    favOk = true
+    act(() => { container.querySelector('.dsh-music-bar-btn.fav').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-error')).toBeNull()
+  })
+
   it('reflects per-song liked state: favorited songs show filled heart, others do not', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
