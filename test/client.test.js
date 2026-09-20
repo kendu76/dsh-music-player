@@ -1386,6 +1386,70 @@ describe('dsh-music-player client render smoke', () => {
     expect(moreBtn).toBeTruthy()
   })
 
+  it('网络电台：「加载更多」在请求进行中显示「加载中…」（与在线音乐同款反馈）', async () => {
+    // 回归：目录的忙碌标记过去只存在 ref（topBusy/cnBusy）里，ref 变化不触发渲染 —— 点
+    // 「加载更多」后按钮文案一直停在「加载更多」，直到请求返回都没有任何进行中反馈
+    // （在线音乐页用 state，点了立刻显示「加载中…」）。这里用可控 fetch 把请求悬停住，
+    // 断言按钮文案真的切到「加载中…」、返回后恢复。
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    radioTopFetches = 0; radioCnFetches = 0
+    await bootClient()
+    // 第 2 次 /radio/cn（=「加载更多」那次）挂起，由测试决定何时放行
+    let release = null
+    let intercepted = 0
+    const pending = new Promise((res) => { release = res })
+    const baseFetch = fetchStub
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url).includes('/dsh-music/radio/cn') && radioCnFetches === 1) {
+        intercepted += 1
+        return pending.then(() => baseFetch(url, opts))
+      }
+      return baseFetch(url, opts)
+    })
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const moreBtn = () => [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')][0]
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const radioTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网络电台')
+      act(() => { radioTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const cnTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '中文电台')
+      act(() => { cnTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      for (let i = 0; i < 25; i++) {
+        await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+        if ([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文电台1'))) break
+      }
+      expect(moreBtn()).toBeTruthy()
+      expect(moreBtn().textContent).toBe('加载更多')
+      // 点「加载更多」→ 请求悬停 → 按钮立刻变「加载中…」
+      act(() => { moreBtn().dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+      expect(intercepted).toBe(1)             // 第二页请求已发出（被测试挂起）
+      expect(moreBtn().textContent).toBe('加载中…')
+      expect(moreBtn().className).toBe('dsh-music-qq-loadmore-btn') // 仍是同一套样式
+      // 进行中再点不会重复发请求（ref 守卫）
+      act(() => { moreBtn().dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+      expect(intercepted).toBe(1)
+      // 放行 → 追加第二页、按钮恢复
+      release()
+      for (let i = 0; i < 20; i++) {
+        await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
+        if ([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文电台51'))) break
+      }
+      expect([...container.querySelectorAll('.dsh-music-qq-station-name')].some((b) => b.textContent.includes('中文电台51'))).toBe(true)
+      expect(moreBtn().textContent).toBe('加载更多')
+    } finally {
+      release()
+      root.unmount()
+    }
+  })
+
   it('网络电台：热门/中文电台列表首次进入拉取一次，切走再切回不再重新请求（缓存）', async () => {
     vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     radioTopFetches = 0; radioCnFetches = 0
