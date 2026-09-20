@@ -2991,6 +2991,74 @@ describe('dsh-music-player client render smoke', () => {
     expect(parseFloat(fill.style.width)).toBeCloseTo(50, 1)
   })
 
+  it('restores a news edition after a refresh (virtual book keyed by edition title)', async () => {
+    // 回归：新闻期次以「虚拟书」播放，续播记录按「期次标题」存进 per-book 映射；
+    // 但恢复侧过去只在 store.books（曲库）里按名字找 → 新闻期次永远恢复不了
+    // （播放条空白、也不回填 N%）。现在按名字反查时兜一层新闻期次；且 /news 列表是
+    // 异步拉的（恢复跑在 /manifest 之后、面板拉 /news 之前），找不到就补拉一次再重试。
+    // newsMetaFixture：charOffsets [0,120,260,380,500]，从 chunk2 恢复 → 260/500 = 52%。
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    bookCharOffsets = []
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '早间新闻播报': { from: 2, base: 400, pos: 0, total: 4, ts: 999999999 },
+    }) }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 刷新恢复 → 补拉 /news → 重试恢复 → 拉期次 meta 回填进度：多拍异步
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 期次标题出现在播放条上（说明恢复成功，而不是空条）
+    const nameEl = container.querySelector('.dsh-music-bar-name')
+    expect(nameEl).not.toBeNull()
+    expect(nameEl.textContent).toContain('早间新闻播报')
+    // 期次按「虚拟书」呈现：报纸图标（NewsIcon）+ 类别名缀在标题后（sectionForChunk）
+    expect(nameEl.querySelector('.dsh-music-note')).toBeTruthy()
+    expect(container.querySelector('.dsh-music-bar-time')).toBeNull() // 闲置态不显示时长
+    // 进度回填到恢复块的起点：260/500 = 52%（暂停态、还没点 ▶）
+    const fill = container.querySelector('.dsh-music-bar-progress-fill')
+    expect(fill).toBeTruthy()
+    expect(parseFloat(fill.style.width)).toBeCloseTo(52, 1)
+    // 打开面板直接落到「新闻播报」页签（togglePanel 按 currentId 判定虚拟书来源）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const activeTab = container.querySelector('.dsh-music-tab.active')
+    expect(activeTab).toBeTruthy()
+    expect(activeTab.textContent).toContain('新闻')
+  })
+
+  it('does not hijack the player if the user starts something while the news list is loading', async () => {
+    // 补拉 /news 的窗口里用户已经自己播了别的 → 迟到的恢复必须放弃，不能抢走播放器。
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    bookCharOffsets = []
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '早间新闻播报': { from: 2, base: 400, pos: 0, total: 4, ts: 999999999 },
+    }) }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 首帧：新闻恢复正在等 /news；此刻用户点播了本地音乐（currentId 变成音乐）
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a'))
+    expect(row).toBeTruthy()
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 播放条仍在音乐上：没有被迟到的新闻恢复顶掉
+    expect(container.querySelector('.dsh-music-bar-name').textContent).not.toContain('早间新闻播报')
+  })
+
   it('loads the current chunk subtitle when resuming a restored book (no gap until next chunk)', async () => {
     // Regression: after a refresh the book is restored PAUSED. Resuming via ▶ went
     // straight to audio.play() WITHOUT loadBookSubtitle, so the current chunk's
@@ -3912,7 +3980,7 @@ describe('dsh-music-player client render smoke', () => {
   // panel, open the AI 讲书 tab, and click the matching book row. Returns the
   // mounted container and the created <audio> so a test can drive
   // currentTime/duration and read the rendered progress fill + percent readout.
-  async function mountProgressBook({ bookName, charOffsets, text }) {
+  async function mountProgressBook({ bookName, charOffsets, text, sections }) {
     const audios = []
     class ProgressAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -3920,7 +3988,7 @@ describe('dsh-music-player client render smoke', () => {
     }
     vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: bookName, url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
-    bookMetaSections = []
+    bookMetaSections = sections || []
     bookCharOffsets = charOffsets
     bookTextFixture = text
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
@@ -4004,6 +4072,99 @@ describe('dsh-music-player client render smoke', () => {
     const p2 = parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
     expect(p2).toBeGreaterThan(p1)
     expect(p2).toBeCloseTo((10 + 20 * 0.5) / 30 * 100, 1) // 50%
+    bookTextFixture = ''
+  })
+
+  it('does not blank the progress line while switching chunks (no 0% dip)', async () => {
+    // 回归：playBookFrom 过去无条件 set({bookProgress: 0})，于是每次切块（讲书自动下一块 /
+    // 新闻下一条）细线先塌到 0%、等新块首个 timeupdate 才跳回——下一块在冷合成时更会在
+    // 整个「AI 合成中…」期间停在 0%。现在用「块起点进度」做种子：自动切块与上一块末端
+    // 无缝相接，不闪不缩。
+    const { container, audio } = await mountProgressBook({ bookName: '切块不归零测试.txt', charOffsets: [0, 10, 30], text: '甲' })
+    audio.duration = 10
+    audio.currentTime = 10 // chunk0 末端 → 33.3%
+    act(() => { audio.emit('timeupdate') })
+    const width = () => parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(width()).toBeCloseTo(33.33, 1)
+    // 自动切到 chunk1：新块此刻还没有任何 timeupdate（真实环境里可能还在合成），
+    // 进度线必须保持 chunk1 起点 = 33.3%，而不是塌成 0%
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(width()).toBeCloseTo(33.33, 1)
+    // 新块首个 timeupdate（块内 0 秒）后仍是 33.3% —— 与上面同一位置，无跳变
+    audio.duration = 20
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    expect(width()).toBeCloseTo(33.33, 1)
+    bookTextFixture = ''
+  })
+
+  it('seeds the progress line at the target chunk when jumping chapters (no 0% flash)', async () => {
+    // 跳章/跳类/点某一条新闻起播：进度线直接显示目标块起点，而不是先归零再跳到目标位置。
+    // 三块 10/20/30 字（合计 60）：第二章从 chunk2 起 → 目标起点 = offsets[2]/60 = 50%。
+    const { container, audio } = await mountProgressBook({
+      bookName: '跳章进度测试.txt', charOffsets: [0, 10, 30, 60], text: '甲',
+      sections: [
+        { type: 'chapter', heading: '第一章', fromChunk: 0 },
+        { type: 'chapter', heading: '第二章', fromChunk: 2 },
+      ],
+    })
+    const width = () => parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(width()).toBe(0) // 从第 0 块起播：起点就是 0%
+    act(() => { container.querySelector('button[title="下一章"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 未派发任何 timeupdate：进度已经是第二章起点 offsets[2]/60 = 30/60 = 50%
+    expect(width()).toBeCloseTo(50, 1)
+    audio.duration = 10
+    audio.currentTime = 5
+    act(() => { audio.emit('timeupdate') })
+    expect(width()).toBeCloseTo(30 / 60 * 100 + (60 - 30) / 60 * 100 * 0.5, 1) // 块内插值继续爬升
+    bookTextFixture = ''
+  })
+
+  it('keeps the same spot when switching voice (no item restart, no progress reset)', async () => {
+    // 回归：换声音 = 重新合成「当前这一块」并重播，旧实现从本条新闻开头重播、进度条
+    // 也回退到块首。现在记下断点（取旧声音真正停下的那一刻，合成期间旧声音还在播），
+    // 新块时长就绪后把位置 seek 回去；进度条在切换期间保持不动。
+    const { container, audio } = await mountProgressBook({ bookName: '换声音测试.txt', charOffsets: [0, 10, 30], text: '甲乙丙' })
+    audio.duration = 10
+    audio.currentTime = 5 // 块内一半
+    act(() => { audio.emit('timeupdate') })
+    const width = () => parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(width()).toBeCloseTo(16.67, 1)
+    // 打开发声弹窗（讲书模式的音量弹层里才有 AI 声音选择）
+    act(() => { container.querySelector('.dsh-music-bar-hotspot').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    expect(volBtn).toBeTruthy()
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 弹层 portal 到 body，且本 describe 里各用例的树不会互相卸载 → body 里可能残留
+    // 上一个用例的弹层。取**最后一个**（最新挂载的那个）才是本用例的。
+    const pops = document.querySelectorAll('.dsh-music-bar-vol-pop.book')
+    expect(pops.length).toBeGreaterThan(0)
+    const sel = pops[pops.length - 1].querySelector('.dsh-music-voice-select')
+    expect(sel).toBeTruthy()
+    expect(sel.value).toBe('白桦') // 本用例是全新实例：默认声音
+    // 换声音会先 fetch 新声音的整块音频并调用 r.arrayBuffer()（fetchStub 没有该方法）
+    vi.stubGlobal('fetch', (url, opts) => {
+      const p = fetchStub(url, opts)
+      return String(url).includes('/dsh-music/book/') ? p.then((r) => ({ ...r, arrayBuffer: async () => new ArrayBuffer(8) })) : p
+    })
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(sel, '冰糖')
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 新声音的块是全新 src：元素位置从 0 开始，但内容位置没变 → 进度条不得回退
+    audio.currentTime = 0
+    expect(width()).toBeCloseTo(16.67, 1)
+    // 新块时长就绪 → 位置被 seek 回断点（5s），而不是从本条开头重播
+    audio.duration = 10
+    act(() => { audio.emit('durationchange') })
+    expect(audio.currentTime).toBeCloseTo(5, 1)
+    // 一次性：后续 durationchange 不会重复 seek（本环境 WAV seek 不可靠，反复 seek 会卡死）
+    audio.currentTime = 0
+    act(() => { audio.emit('durationchange') })
+    expect(audio.currentTime).toBe(0)
     bookTextFixture = ''
   })
 
@@ -12004,6 +12165,185 @@ describe('news pane（新闻播报页签）', () => {
     } finally {
       bookTextFixture = ''
     }
+  })
+
+  it('正在播这一期时，面板上的 ▶ 不再把它从头重播（不重复播放）', async () => {
+    // 回归：卡片 ▶ / 详情「▶ 播放整期」无条件 playFrom(id, 0) → 听到第 3 条时误触一下，
+    // 整期从开场白重头播、位置全丢。现在同一期已在播时不再重复播放：正在播 → 按钮禁用
+    // （title「正在播放中」），暂停中 → 变「继续播放」，点了从当前位置接着播。
+    bookTextFixture = '这是新闻播报的块字幕文本。'
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    const audios = []
+    // 给 <audio> 装上 src 计数器：一次「重新加载」＝一次 src 赋值——比比对 URL 更精确
+    // （同块重新加载时 URL 字符串可能一模一样）。
+    class NewsAudio extends FakeAudio {
+      constructor() { super(); this.srcSets = 0; audios.push(this) }
+      set src(v) { this.srcSets += 1; this._src = v; return v }
+      get src() { return this._src === undefined ? '' : this._src }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    await bootClient(NewsAudio)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const card = () => [...container.querySelectorAll('.dsh-music-news-card')].find((r) => r.textContent.includes('早间新闻播报'))
+    const cardBtn = () => card().querySelector('.dsh-music-news-card-actions button')
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      // (1) 未播状态连点两次 ▶（双击/连点）：只加载一次、从第 0 块开始——不会播两遍
+      expect(cardBtn().disabled).toBe(false)
+      expect(cardBtn().title).toBe('播放整期')
+      const audio = audios[0]
+      const setsStart = audio.srcSets
+      act(() => {
+        cardBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        cardBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await tick()
+      await tick()
+      expect(String(audio.src)).toContain('/dsh-music/news/news-20260530-0800-abcd')
+      expect(String(audio.src)).toContain('from=0')
+      expect(audio.srcSets).toBe(setsStart + 1)
+      act(() => { audio.emit('play') })
+      // (2) 连听两条（自动切块）→ 现在停在第 3 条（chunk 2）
+      audio.duration = 10
+      audio.currentTime = 10
+      act(() => { audio.emit('timeupdate') })
+      act(() => { audio.emit('ended') })
+      await tick()
+      act(() => { audio.emit('ended') })
+      await tick()
+      expect(String(audio.src)).toContain('from=2')
+      // (3) 正在播：卡片 ▶ 禁用 + 提示（浏览器里点不动）；此时也不存在任何会从头重播的入口
+      const setsBefore = audio.srcSets
+      expect(cardBtn().disabled).toBe(true)
+      expect(cardBtn().title).toBe('正在播放中')
+      // (4) 详情视图：头部按钮显示「正在播放」且禁用，点它不重播
+      act(() => { card().querySelector('.dsh-music-news-card-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      const headBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '正在播放')
+      expect(headBtn).toBeTruthy()
+      expect(headBtn.disabled).toBe(true)
+      act(() => { headBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      expect(audio.srcSets).toBe(setsBefore)
+      expect(String(audio.src)).toContain('from=2')
+      // (5) 详情视图标出正在播的类别（chunk2 属「国内」）
+      const liveBadge = container.querySelector('.dsh-music-news-card-badge.live')
+      expect(liveBadge).toBeTruthy()
+      expect(liveBadge.closest('div').textContent).toContain('国内')
+      // (5b) 正在播的那一条也标出来，且它自己的 ▶ 禁用（否则用户点它没反应会以为坏了）；
+      //      其余条目的 ▶ 仍可用（跳播不被守卫影响）
+      const body = container.querySelector('.dsh-music-news-body')
+      const itemMarks = [...body.querySelectorAll('.dsh-music-track-name .dsh-music-news-card-badge.live')]
+      expect(itemMarks.length).toBe(1)
+      const markedRow = itemMarks[0].closest('.dsh-music-track')
+      expect(markedRow.querySelector('.dsh-music-track-name').textContent).toContain('国内')
+      expect(markedRow.querySelector('button').disabled).toBe(true)
+      expect(markedRow.querySelector('button').title).toBe('正在播放中')
+      const otherRows = [...body.querySelectorAll('.dsh-music-track')].filter((r) => r !== markedRow)
+      expect(otherRows.length).toBeGreaterThan(0)
+      expect(otherRows.every((r) => r.querySelector('button').disabled === false)).toBe(true)
+      // (6) 点**当前类别**的 ▶（跳转目标就是当前块）：同样不重新加载、不从头重播
+      act(() => { liveBadge.closest('div').querySelector('button').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      expect(audio.srcSets).toBe(setsBefore)
+      expect(String(audio.src)).toContain('from=2')
+      // (7) 但跳别的类别照常生效（守卫不能把正常跳播也拦掉）
+      const aiSec = [...container.querySelectorAll('button')].filter((b) => b.textContent === '▶')
+      const aiRow = [...container.querySelectorAll('div')].find((d) => d.textContent.startsWith('AI（'))
+      act(() => { aiRow.querySelector('button').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      expect(audio.srcSets).toBe(setsBefore + 1)
+      expect(String(audio.src)).toContain('from=3')
+      expect(aiSec.length).toBeGreaterThan(0)
+      // (8) 暂停这一期 → 回到列表：▶ 变「继续播放」，点了从当前位置接着播（不是从 from=0 重来）
+      // pausing 必须动元素本身（paused 标志）而不只是派发事件，否则 togglePlay 会走别的分支
+      act(() => { audio.pause(); audio.emit('pause') })
+      await tick()
+      act(() => { [...container.querySelectorAll('button')].find((b) => b.textContent === '← 返回').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      expect(cardBtn().disabled).toBe(false)
+      expect(cardBtn().title).toBe('继续播放')
+      const setsPaused = audio.srcSets
+      act(() => { cardBtn().dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 续播要等采集管线拆除落定（quiesceThen 最多 150ms）后才真正 play()
+      await act(async () => { await new Promise((r) => setTimeout(r, 250)) })
+      expect(audio.paused).toBe(false)
+      expect(String(audio.src)).toContain('from=3')
+      expect(String(audio.src)).not.toContain('from=0')
+      expect(audio.srcSets).toBeGreaterThan(setsPaused) // 重新加载的是第 3 块，不是第 0 块
+    } finally {
+      root.unmount()
+      bookTextFixture = ''
+    }
+  })
+
+  it('同一期播报意图被重复投递时不会从头重播（定时任务/agent 路径）', async () => {
+    // 同一个 intent 再次到达（例如「▶ 立即执行」撞上 10 分钟冷却窗、Host 把已存在的期次
+    // 原样回推）不该把正在听的整期从头重播；intent 是「播这一期」语义（whole）。
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    prefsServer = {}
+    const audios = []
+    class IntentAudio extends FakeAudio {
+      constructor() { super(); this.srcSets = 0; audios.push(this) }
+      set src(v) { this.srcSets += 1; this._src = v; return v }
+      get src() { return this._src === undefined ? '' : this._src }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    const baseFetch = fetchStub
+    const fetcher = (url, opts) => (String(url) === '/dsh-music/intent' ? jsonRes(intent) : baseFetch(url, opts))
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', IntentAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 首次投递 → 从第 0 块起播
+    intent = { action: 'play', kind: 'news', id: 'news-20260530-0800-abcd' }
+    await act(async () => { await intentPoll() })
+    await tick()
+    expect(String(audio.src)).toContain('/dsh-music/news/news-20260530-0800-abcd')
+    expect(String(audio.src)).toContain('from=0')
+    act(() => { audio.emit('play') })
+    // 听到第 3 条（chunk 2）
+    audio.duration = 10
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    act(() => { audio.emit('ended') })
+    await tick()
+    act(() => { audio.emit('ended') })
+    await tick()
+    expect(String(audio.src)).toContain('from=2')
+    // 同一 intent 再次到达 → 不重新加载、不回到 from=0
+    const setsBefore = audio.srcSets
+    await act(async () => { await intentPoll() })
+    await tick()
+    expect(audio.srcSets).toBe(setsBefore)
+    expect(String(audio.src)).toContain('from=2')
+    expect(String(audio.src)).not.toContain('from=0')
   })
 
   it('各 tab 底部提示（本地音乐/AI讲书/新闻播报/关于）统一使用 tts-hint 页脚，样式与文本风格一致', async () => {
