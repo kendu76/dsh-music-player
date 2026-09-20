@@ -730,6 +730,44 @@ describe('news 路由', () => {
     } finally { cleanup() }
   })
 
+  it('停用每日定时（enabled=false）能真正取消：再读仍是 false，不被 loadNews 回弹成 true', async () => {
+    // 回归：面板取消勾选 → POST enabled:false 落盘成功，但 Host 的 loadNews() 用
+    // sanitizeSchedulePrefs({}, 磁盘快照) 规整，旧实现在 input 为 truthy 空对象时恒取
+    // `input.enabled !== false` → 恒 true，于是每次 GET 又把 false 改回 true：面板里
+    // 「取消勾选后再进去又勾上了」，定时器照旧到点触发。
+    const { handler, home, cleanup } = boot()
+    try {
+      const post = async (obj) => {
+        const res = makeRes()
+        await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body: JSON.stringify(obj) }), res)
+        return JSON.parse(res.body).schedulePrefs
+      }
+      const get = async (url = '/dsh-music/news/schedule') => {
+        const res = makeRes()
+        await handler(makeReq({ url }), res)
+        return JSON.parse(res.body)
+      }
+      // 1) 先正常启用一个定时任务
+      const shifts = [{ id: 's1', time: '10:00', autoplay: true, workdaysOnly: true, scope: { categories: ['热点'], topics: [] }, itemCount: 8 }]
+      expect((await post({ enabled: true, shifts })).enabled).toBe(true)
+      // 2) 取消勾选
+      expect((await post({ enabled: false, shifts })).enabled).toBe(false)
+      // 3) 重新读取（面板「再进去」就是这一步）：必须仍是 false
+      expect((await get()).schedulePrefs.enabled).toBe(false)
+      // 4) 中间只要有任何一次 loadNews（GET /news、/runstate 等都会触发），也不能回弹
+      await get('/dsh-music/news')
+      await get('/dsh-music/news/runstate')
+      expect((await get()).schedulePrefs.enabled).toBe(false)
+      // 5) 磁盘上的值同样是 false（不是只在内存里正确）
+      const onDisk = JSON.parse(readFileSync(join(home, '.dsh', 'music-player-news.json'), 'utf8'))
+      expect(onDisk.schedulePrefs.enabled).toBe(false)
+      expect(onDisk.schedulePrefs.shifts.length).toBe(1) // 定时任务配置保留
+      // 6) 勾回来仍然有效
+      expect((await post({ enabled: true, shifts })).enabled).toBe(true)
+      expect((await get()).schedulePrefs.enabled).toBe(true)
+    } finally { cleanup() }
+  })
+
   it('schedule 偏好 POST 落盘「仅工作日执行」（workdaysOnly）', async () => {
     const { handler, cleanup } = boot()
     try {

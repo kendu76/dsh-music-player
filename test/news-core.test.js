@@ -325,6 +325,27 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.prefVersion).toBe(0)
     expect(p.syncedVersion).toBe(-1)
   })
+  it('未传 enabled 时保留 prev（Host loadNews 用 sanitizeSchedulePrefs({}, 磁盘快照)）', () => {
+    // 回归：旧写法 `input && typeof input === 'object' ? input.enabled !== false : ...` 在
+    // input 为 truthy 空对象时恒取第一支 → enabled 恒 true，把用户存下的 false 改回 true：
+    // 面板里「取消勾选后再进去又勾上了」，定时器也照旧到点触发。
+    const prev = {
+      enabled: false,
+      shifts: [{ id: 's1', time: '10:00', autoplay: true, workdaysOnly: true, scope: { categories: ['热点'], topics: [] }, itemCount: 8 }],
+      prefVersion: 42,
+      syncedVersion: -1,
+    }
+    const kept = sanitizeSchedulePrefs({}, prev)
+    expect(kept.enabled).toBe(false)       // 关键：保留 false，而不是回弹 true
+    expect(kept.shifts.length).toBe(1)     // 其它字段照旧从 prev 继承
+    expect(kept.shifts[0].workdaysOnly).toBe(true)
+    expect(kept.prefVersion).toBe(42)
+    // 显式传了才覆盖（面板勾回来）
+    expect(sanitizeSchedulePrefs({ enabled: true, shifts: prev.shifts }, prev).enabled).toBe(true)
+    // 旧数据里根本没有 enabled 字段 → 仍按默认启用
+    expect(sanitizeSchedulePrefs({}, { shifts: [] }).enabled).toBe(true)
+    expect(sanitizeSchedulePrefs({}).enabled).toBe(true)
+  })
   it('defaultScope 已退役：入参中的该字段被丢弃', () => {
     const p = sanitizeSchedulePrefs({
       defaultScope: { categories: ['热点', '不存在', '国内'], topics: ['AI', ''] },
