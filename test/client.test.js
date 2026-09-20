@@ -2911,6 +2911,99 @@ describe('dsh-music-player client render smoke', () => {
     expect(volPop.querySelector('.dsh-music-vol-slider')).toBeTruthy()
   })
 
+  it('播放条贴到视口顶部时弹窗翻到按钮下方，并显式清掉 CSS 的 bottom（音乐音量/播放模式）', async () => {
+    // 悬浮条被拖到页面顶部时，弹窗必须从「向上弹」翻成「向下弹」。jsdom 没有布局，
+    // getBoundingClientRect 全零 → 用 stub 的 rect 驱动翻转分支（等价于真实浏览器里
+    // 悬浮条贴在顶部时触发按钮的几何：top≈40）。
+    // 同时回归：弹层基础 CSS 带 `bottom: calc(100% + 6px)`（它们当年是 bar 内部的 absolute
+    // 弹层），翻到下方时若只写 top 不写 bottom，height:auto 的弹层会把 top 与 bottom 一起
+    // 参与计算 → 盒子高度算成负值 → 卡片壳塌成 0、只剩溢出的内容。
+    const rectAt = (top, height, left = 600, width = 32) => ({
+      top, bottom: top + height, left, right: left + width, width, height, x: left, y: top, toJSON: () => ({}),
+    })
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 音乐音量弹窗（固定 108 高）
+    container.querySelector('.dsh-music-bar-vol').getBoundingClientRect = () => rectAt(40, 24)
+    act(() => { container.querySelector('.dsh-music-bar-hotspot').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick()
+    const volPop = container.querySelector('.dsh-music-bar-vol-pop')
+    expect(volPop).toBeTruthy()
+    expect(volPop.style.position).toBe('fixed')
+    expect(volPop.style.top).toBe('70px')        // 锚点底边 64 + 6
+    expect(volPop.style.bottom).toBe('auto')     // 关键：清掉 CSS 的 bottom，否则高度算错
+    expect(volPop.style.transform).toBe('translate(-50%, 0)')
+    act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await tick()
+    // 播放模式弹窗（固定 108 高）
+    container.querySelector('.dsh-music-mode-menu').getBoundingClientRect = () => rectAt(40, 24)
+    act(() => { container.querySelector('.dsh-music-bar-hotspot').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '顺序播放')
+    act(() => { modeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick()
+    const modePop = container.querySelector('.dsh-music-mode-pop')
+    expect(modePop).toBeTruthy()
+    expect(modePop.style.top).toBe('70px')
+    expect(modePop.style.bottom).toBe('auto')
+  })
+
+  it('播放条贴到视口顶部时：章节目录 / 讲书音量弹窗同样翻到下方（bottom:auto + maxHeight 兜高度）', async () => {
+    // 同上，但这两个是 height:auto 的弹层——正是旧实现里真正会塌成 0 高度的两个。
+    const rectAt = (top, height, left = 600, width = 32) => ({
+      top, bottom: top + height, left, right: left + width, width, height, x: left, y: top, toJSON: () => ({}),
+    })
+    const book = { id: 'b1', name: '贴顶弹窗测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [book] }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('贴顶弹窗测试'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      // 章节目录（anchorPopAbove：自动高度）
+      container.querySelector('.dsh-music-toc-trigger').getBoundingClientRect = () => rectAt(40, 32)
+      await act(async () => {
+        container.querySelector('button[title="章节目录"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      const tocPanel = container.querySelector('.dsh-music-toc')
+      expect(tocPanel).toBeTruthy()
+      expect(tocPanel.style.top).toBe('78px')       // 锚点底边 72 + 6
+      expect(tocPanel.style.bottom).toBe('auto')
+      expect(parseFloat(tocPanel.style.maxHeight)).toBeGreaterThan(120)
+      // 讲书音量弹窗（AI 声音 + 音量滑块，同样自动高度）
+      container.querySelector('.dsh-music-bar-vol').getBoundingClientRect = () => rectAt(40, 24)
+      act(() => { container.querySelector('.dsh-music-bar-hotspot').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+      act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await tick()
+      const volPop = container.querySelector('.dsh-music-bar-vol-pop.book')
+      expect(volPop).toBeTruthy()
+      expect(volPop.style.top).toBe('70px')
+      expect(volPop.style.bottom).toBe('auto')
+      expect(parseFloat(volPop.style.maxHeight)).toBeGreaterThan(120)
+    } finally {
+      root.unmount()
+    }
+  })
+
   it('shows the restored chapter immediately after a refresh (no play needed)', async () => {
     // Simulate a saved book playback at chunk 10 (第三章 转), then re-boot so
     // restoreLatest() runs during load — the same path as a page refresh.
