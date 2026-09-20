@@ -26,6 +26,8 @@ vi.mock('../lib/kugou.js', () => ({
   getDownloadURL: vi.fn(),
   registerDevice: vi.fn(),
   createDeviceIdentity: vi.fn(),
+  // 该导出已随「主动续命」一并删除（2026-09-20）；保留 key 作哨兵：登录/取链流程若又被
+  // 加回被动续命，下面几处 not.toHaveBeenCalled() 会立刻变红。
   refreshSession: vi.fn(),
   getMyUserInfo: vi.fn(),
   loginStart: vi.fn(),
@@ -288,7 +290,7 @@ describe('酷狗登出/失效保留设备指纹（guid/mid/dfid），重扫=老�
 })
 
 describe('酷狗登录 token 直接使用：login/check 不再做登录后刷新', () => {
-  it('扫码登录成功 → 直接存扫码 token，不调用 refreshSession（对齐 MakcRe）', async () => {
+  it('扫码登录成功 → 直接存扫码 token，不做续命/兑换（对齐 MakcRe）', async () => {
     writeFileSync(booted.cookieFile, JSON.stringify({
       session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: '', userid: '', vip_type: '', vip_token: '' },
       loggedIn: false, savedAt: Date.now(),
