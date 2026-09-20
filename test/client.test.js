@@ -10333,6 +10333,52 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).not.toContain('音频加载或解码失败')
   })
 
+  it('本地曲目解码失败时自动跳到下一首，而不是把播放停死', async () => {
+    // 回归：Chrome 换用 Rust 写的 Symphonia 解码器后，末帧被截断的 MP3 会在播完最后
+    // 一个完整帧时抛 MEDIA_ERR_DECODE（malformed stream: mpa: invalid packet length）。
+    // 此前本地曲目直接落到 set({error, playing:false}) 停死（在线队列早就会自动跳过），
+    // 表现为「放到 99.9% 突然停住、点一下播放又能继续」。
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const m = baseManifest()
+    m.tracks = [
+      { id: '0', name: 'bad.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/bad.mp3' },
+      { id: '1', name: 'good.mp3', url: '/dsh-music/1', size: 10, ext: 'mp3', path: '/music/good.mp3' },
+    ]
+    m.count = 2
+    manifest = m
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient(LocalAudio)
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+
+    // 播第一首（本地坏文件）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const badRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('bad.mp3'))
+    expect(badRow).toBeTruthy()
+    act(() => { badRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('bad')
+
+    // 模拟 Symphonia 解码失败
+    const playing = audios.find((a) => a.src && a.src.includes('/dsh-music/0'))
+    expect(playing).toBeTruthy()
+    act(() => { playing.emit('error') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 关键：自动跳到下一首继续，而不是停播 + 报错
+    expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('good')
+    expect(container.textContent).not.toContain('音频加载或解码失败')
+  })
+
   it('stops with an error when the only online song fails to load', async () => {
     // A single-song QQ queue that fails must NOT loop forever: it stops and
     // surfaces the error, so the user knows why playback halted.
