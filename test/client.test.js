@@ -10379,6 +10379,90 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).not.toContain('音频加载或解码失败')
   })
 
+  // 下面两条补上本地侧「跳过计数」的边界（PR #13 只覆盖了「坏 → 跳成功」的正常路径）：
+  // 整列都坏时必须跳完一轮就停下报错，且失败源先派发 play 不能把计数清零；单曲队列无处可跳，
+  // 必须直接报错而不是反复重载同一首。
+  it('本地整列曲目全失败时不会无限跳歌：跳完一轮即停下报错', async () => {
+    const audios = []
+    class AllBadAudio extends FakeAudio {
+      constructor() { super(); this.srcLoads = 0; audios.push(this) }
+      set src(v) { this.srcLoads += 1; this._src = v; return v }
+      get src() { return this._src === undefined ? '' : this._src }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const m = baseManifest()
+    m.tracks = [
+      { id: '0', name: 'bad0.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/bad0.mp3' },
+      { id: '1', name: 'bad1.mp3', url: '/dsh-music/1', size: 10, ext: 'mp3', path: '/music/bad1.mp3' },
+      { id: '2', name: 'bad2.mp3', url: '/dsh-music/2', size: 10, ext: 'mp3', path: '/music/bad2.mp3' },
+    ]
+    m.count = 3
+    manifest = m
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient(AllBadAudio)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('bad0.mp3'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick()
+    const audio = audios[0]
+    const loadsAfterStart = audio.srcLoads
+    // 跳完一整轮（三首各失败一次）：失败源同样会先派发 'play'，计数只在真实起播时清零，
+    // 所以这几轮都应该继续跳、且还不报错。
+    for (let i = 0; i < 3; i++) {
+      act(() => { audio.emit('play'); audio.emit('error') })
+      await tick()
+    }
+    expect(audio.srcLoads).toBeGreaterThanOrEqual(loadsAfterStart + 3) // 确实在跳
+    expect(container.textContent).not.toContain('音频加载或解码失败')
+    // 第 4 次失败（一整轮已跳完，计数 == 队列长度）→ 停下报错，且不再加载
+    act(() => { audio.emit('play'); audio.emit('error') })
+    await tick()
+    expect(container.textContent).toContain('音频加载或解码失败')
+    const loadsAtStop = audio.srcLoads
+    for (let i = 0; i < 3; i++) { act(() => { audio.emit('error') }); await tick() }
+    expect(audio.srcLoads).toBe(loadsAtStop) // 不会无限回绕跳歌
+  })
+
+  it('本地队列只有一首且是坏文件：直接报错，不反复重载同一首', async () => {
+    const audios = []
+    class SoloBadAudio extends FakeAudio {
+      constructor() { super(); this.srcLoads = 0; audios.push(this) }
+      set src(v) { this.srcLoads += 1; this._src = v; return v }
+      get src() { return this._src === undefined ? '' : this._src }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const m = baseManifest()
+    m.tracks = [{ id: '0', name: 'only-bad.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/only-bad.mp3' }]
+    m.count = 1
+    manifest = m
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient(SoloBadAudio)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('only-bad.mp3'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick()
+    const audio = audios[0]
+    const loads = audio.srcLoads
+    for (let i = 0; i < 3; i++) { act(() => { audio.emit('play'); audio.emit('error') }); await tick() }
+    // 无处可跳：直接报错并停住，且不会把同一首反复重载（否则就是死循环）
+    expect(container.textContent).toContain('音频加载或解码失败')
+    expect(audio.srcLoads).toBe(loads)
+  })
+
   it('stops with an error when the only online song fails to load', async () => {
     // A single-song QQ queue that fails must NOT loop forever: it stops and
     // surfaces the error, so the user knows why playback halted.
