@@ -22,6 +22,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 // ---- captured plugin data ----
 let factory = null
 let registered = [] // [{ id, elementFactory }]
+let injectedSlotNames = [] // slots.inject 收到的插槽名（断言挂载位置用）
 let manifest = null
 
 // ---- minimal browser stubs ----
@@ -413,6 +414,7 @@ let radioCnFetches = 0
 async function bootClient(AudioClass = FakeAudio) {
   factory = null
   registered = []
+  injectedSlotNames = []
   radioTopFetches = 0
   radioCnFetches = 0
   window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
@@ -432,7 +434,7 @@ async function bootClient(AudioClass = FakeAudio) {
   const modExports = factory((name) => (name === 'react' ? React : undefined))
 
   const slots = {
-    inject: (name, cb) => { cb() },
+    inject: (name, cb) => { injectedSlotNames.push(name); cb() },
     register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
   }
   const ctx = {
@@ -2238,7 +2240,8 @@ describe('dsh-music-player client render smoke', () => {
       document.body.appendChild(container)
       const root = createRoot(container)
       act(() => { root.render(React.createElement('div', null, bar, panel)) })
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 不打开弹窗：弹窗打开后顶部也会渲染一条播放条（两条并存会使计数翻倍）；
+      // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -2320,7 +2323,8 @@ describe('dsh-music-player client render smoke', () => {
       document.body.appendChild(container)
       const root = createRoot(container)
       act(() => { root.render(React.createElement('div', null, bar, panel)) })
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 不打开弹窗：弹窗打开后顶部也会渲染一条播放条（两条并存会使计数翻倍）；
+      // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -2499,7 +2503,8 @@ describe('dsh-music-player client render smoke', () => {
       document.body.appendChild(container)
       const root = createRoot(container)
       act(() => { root.render(React.createElement('div', null, bar, panel)) })
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 不打开弹窗：弹窗顶部也会渲染一条播放条（两条并存会让 rects 翻倍）；
+      // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -4662,7 +4667,8 @@ describe('dsh-music-player client render smoke', () => {
       document.body.appendChild(container)
       const root = createRoot(container)
       act(() => { root.render(React.createElement('div', null, bar, panel)) })
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 不打开弹窗：弹窗打开后顶部也会渲染一条播放条（两条并存会使计数翻倍）；
+      // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -6825,7 +6831,8 @@ describe('dsh-music-player client render smoke', () => {
     document.body.appendChild(container)
     const root = createRoot(container)
     act(() => { root.render(React.createElement('div', null, bar, panel)) })
-    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 不打开弹窗：弹窗打开后顶部也会渲染一条播放条（两条并存会使计数翻倍）；
+    // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const ncTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '网易云')
     act(() => { ncTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -7996,7 +8003,8 @@ describe('dsh-music-player client render smoke', () => {
       document.body.appendChild(container)
       const root = createRoot(container)
       act(() => { root.render(React.createElement('div', null, bar, panel)) })
-      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 不打开弹窗：弹窗打开后顶部也会渲染一条播放条（两条并存会使计数翻倍）；
+      // 隐藏面板里的曲目在 DOM 中，直接派发点击即可起播，这里只测全局那条。
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
       act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -10463,6 +10471,45 @@ describe('dsh-music-player client render smoke', () => {
     expect(audio.srcLoads).toBe(loads)
   })
 
+  it('自动跳歌有时间窗护栏：失败源反复派发 playing 也不会在几秒内连跳一整列', async () => {
+    // 现场回归：加载失败的源也会先派发 play/playing（拿到零星数据即断流），
+    // 计数被反复清零 → 几秒内把整列曲目连跳一遍，表现为「一开始播放就无限下一曲」。
+    // 护栏：10s 内最多自动跳 3 首，超出即停下报错。
+    const audios = []
+    class PlayThenErrAudio extends FakeAudio {
+      constructor() { super(); this.srcLoads = 0; audios.push(this) }
+      set src(v) { this.srcLoads += 1; this._src = v; return v }
+      get src() { return this._src === undefined ? '' : this._src }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    const m = baseManifest()
+    m.tracks = Array.from({ length: 6 }, (_, i) => ({ id: String(i), name: 'bad' + i + '.mp3', url: '/dsh-music/' + i, size: 10, ext: 'mp3', path: '/music/bad' + i + '.mp3' }))
+    m.count = 6
+    manifest = m
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient(PlayThenErrAudio)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('bad0.mp3'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await tick()
+    const audio = audios[0]
+    const loadsAfterStart = audio.srcLoads
+    // 每轮都模拟「先起播、再失败」：计数每次都被清零，只能靠时间窗拦住
+    for (let i = 0; i < 4; i++) { act(() => { audio.emit('play'); audio.emit('playing'); audio.emit('error') }); await tick() }
+    expect(container.textContent).toContain('音频加载或解码失败')
+    const loadsAtStop = audio.srcLoads
+    expect(loadsAtStop).toBeLessThanOrEqual(loadsAfterStart + 3) // 10s 内最多跳 3 首
+    for (let i = 0; i < 3; i++) { act(() => { audio.emit('play'); audio.emit('playing'); audio.emit('error') }); await tick() }
+    expect(audio.srcLoads).toBe(loadsAtStop) // 停住后不再跳
+  })
+
   it('stops with an error when the only online song fails to load', async () => {
     // A single-song QQ queue that fails must NOT loop forever: it stops and
     // surfaces the error, so the user knows why playback halted.
@@ -11102,7 +11149,7 @@ describe('dsh-music-player client render smoke', () => {
     // 播放条位置分段选择器（在系统配置最下方）：默认「输入框上方」选中（= 既有行为）；
     // 切到「页面底部」并持久化。
     const posSegs = segOf('播放条位置')
-    expect(posSegs.map((b) => b.textContent)).toEqual(['输入框上方', '页面底部', '悬浮可拖动'])
+    expect(posSegs.map((b) => b.textContent)).toEqual(['输入框上方', '页面底部', '悬浮可拖动', '极简'])
     expect(posSegs.findIndex((b) => b.classList.contains('on'))).toBe(0)
     act(() => { posSegs[1].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
@@ -12740,6 +12787,9 @@ function installXtabHub() {
     seen,
     inject: (data) => { for (const c of [...channels]) { if (c.closed) continue; for (const fn of c.listeners) fn({ data }) } },
   }
+
+
+
 }
 
 describe('多标签页统一播放器（跨标签页唯一出声 + 状态镜像）', () => {
@@ -12932,7 +12982,7 @@ describe('多标签页统一播放器（跨标签页唯一出声 + 状态镜像�
 })
 
 // ==========================================================================
-// 播放条位置（系统配置「播放条位置」：输入框上方 / 页面底部 / 悬浮可拖动）
+// 播放条位置（系统配置「播放条位置」：输入框上方 / 页面底部 / 悬浮可拖动 / 极简）
 // ==========================================================================
 describe('播放条显示位置', () => {
   const barById = (id) => (registered.find((r) => r.id === id) || {}).elementFactory
@@ -12949,6 +12999,8 @@ describe('播放条显示位置', () => {
       dock: barById('music-player-bar'),
       overlay: barById('music-player-bar-floating'),
       panel: (registered.find((r) => r.id === 'music-player-panel') || {}).elementFactory,
+      // 极简模式专用的左下角音乐图标（shell.overlay 独立注册）
+      trigger: (registered.find((r) => r.id === 'music-player-mini-trigger') || {}).elementFactory,
     }
   }
   function mount(...elements) {
@@ -13297,5 +13349,129 @@ describe('播放条显示位置', () => {
     expect(wrap.style.left).toBe('')
     expect(wrap.style.top).toBe('')
     expect(prefsServer['dsh-music-bar-float-pos']).toBeUndefined()
+  })
+  it('极简：系统配置出现「极简」选项，选中后持久化 bar-pos=minimal，播放条与音乐图标按预期切换', async () => {
+    const { dock, overlay, panel, trigger } = await bootWithPrefs({})
+    const container = mount(dock(), overlay(), panel(), trigger())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 极简前：输入框上方那条在，左下角图标不存在
+    expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(1)
+    expect(container.querySelector('#dsh-music-mini-trigger')).toBeNull()
+    // 打开「系统配置」，落到「播放条位置」行（系统配置最后一项）
+    act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const posRow = [...container.querySelectorAll('.dsh-music-config-row')].find((r) => {
+      const l = r.querySelector('.dsh-music-config-label')
+      return l !== null && l.textContent === '播放条位置'
+    })
+    const segs = [...posRow.querySelectorAll('.dsh-music-config-seg-btn')]
+    expect(segs.map((b) => b.textContent)).toEqual(['输入框上方', '页面底部', '悬浮可拖动', '极简'])
+    act(() => { segs[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-bar-pos'])
+    expect(post).toBeTruthy()
+    expect(post.prefs['dsh-music-bar-pos']).toBe('minimal')
+    expect(prefsServer['dsh-music-bar-pos']).toBe('minimal')
+    // 极简后：播放条完全消失（两条全局挂载点都不画），左下角出现音乐图标
+    expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(0)
+    expect(document.documentElement.hasAttribute('data-dsh-music-bar-bottom')).toBe(false)
+    expect(container.querySelector('#dsh-music-mini-trigger')).toBeTruthy()
+  })
+
+  it('极简：两条全局挂载点都不渲染播放条；音乐图标只在极简模式下出现', async () => {
+    const minimal = await bootWithPrefs({ 'dsh-music-bar-pos': 'minimal' })
+    // 图标挂在输入框右侧控件区（conversation.input.right），排在模型选择器左边，
+    // 空白会话的输入框也有这一行，所以新会话同样能看到入口
+    expect(injectedSlotNames).toContain('conversation.input.right')
+    // 静态渲染与真实挂载都没有播放条
+    expect(countWraps(renderToString(React.createElement('div', null, minimal.dock(), minimal.overlay())))).toBe(0)
+    const container = mount(minimal.dock(), minimal.overlay(), minimal.panel(), minimal.trigger())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(0)
+    const mini = container.querySelector('#dsh-music-mini-trigger')
+    expect(mini).toBeTruthy()
+    expect(mini.getAttribute('aria-label')).toBe('打开音乐播放器')
+    expect(mini.className).not.toContain('playing')   // 未播放 → 无动效
+    expect(mini.querySelector('.dsh-music-mini-ping')).toBeNull()  // 也不画外圈光圈
+    expect(mini.querySelector('linearGradient')).toBeNull()        // 静态图标：不渲染流光渐变
+
+    // 非极简（逐项检查）：即使注册点渲染，图标也不出现
+    for (const pos of ['dock', 'bottom', 'float']) {
+      const other = await bootWithPrefs({ 'dsh-music-bar-pos': pos })
+      const c2 = mount(other.dock(), other.overlay(), other.panel(), other.trigger())
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(c2.querySelector('#dsh-music-mini-trigger')).toBeNull()
+    }
+  })
+
+  it('极简：播放时图标带 playing 动效 class；点击图标打开弹窗，弹窗顶部有一条功能完整的播放条', async () => {
+    const audios = []
+    class PlayAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+      play() { this.paused = false; this.emit('play'); return Promise.resolve() }
+    }
+    const { dock, overlay, panel, trigger } = await bootWithPrefs({ 'dsh-music-bar-pos': 'minimal' }, PlayAudio)
+    const container = mount(dock(), overlay(), panel(), trigger())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    let mini = container.querySelector('#dsh-music-mini-trigger')
+    expect(mini).toBeTruthy()
+    expect(mini.className).not.toContain('playing')
+    // 起播：点隐藏面板里的曲目（极简下没有全局播放条，弹窗仍渲染在 DOM 中）
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    expect(track).toBeTruthy()
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    mini = container.querySelector('#dsh-music-mini-trigger')
+    expect(mini.className).toContain('playing')        // 播放中 → 动效 class
+    expect(mini.querySelector('.dsh-music-mini-ping')).toBeNull()  // 流光不加外圈光圈
+    expect(mini.querySelector('linearGradient')).toBeTruthy()      // 流光：渐变随时间扫过音符
+    expect(mini.getAttribute('title')).toContain('正在播放')
+    // 点击图标 → 打开弹窗；弹窗顶部出现播放条，此时页面上仅此一条（极简下全局条不存在）
+    expect(container.querySelector('.dsh-music-panel').style.display).toBe('none')
+    act(() => { mini.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-panel').style.display).toBe('')
+    const wraps = container.querySelectorAll('.dsh-music-panel-bar #dsh-music-bar-wrap')
+    expect(wraps.length).toBe(1)
+    expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(1)
+    // 功能与现有播放条一致：有控制按钮、有频谱画布、有进度/音量等控件
+    expect(wraps[0].querySelectorAll('.dsh-music-bar-btn').length).toBeGreaterThan(0)
+    expect(wraps[0].querySelector('.dsh-music-viz')).toBeTruthy()
+    expect(wraps[0].querySelector('.dsh-music-bar-controls')).toBeTruthy()
+  })
+
+  it('任意播放条位置：弹窗顶部都有一条播放条，且与全局播放条逻辑一致（点歌名同样开合弹窗）', async () => {
+    for (const pos of ['dock', 'bottom', 'float', 'minimal']) {
+      const { dock, overlay, panel, trigger } = await bootWithPrefs({
+        'dsh-music-bar-pos': pos,
+        // 预置一条当前曲目：播放条从空态进入有歌状态，控制按钮/频谱才会渲染
+        'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+        'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+      })
+      const c = document.createElement('div')
+      document.body.appendChild(c)
+      const r = createRoot(c)
+      act(() => { r.render(React.createElement('div', null, dock(), overlay(), panel(), trigger())) })
+      await act(async () => { await new Promise((r2) => setTimeout(r2, 0)) })
+      // 极简下只能靠左下角图标开弹窗；其它落位点播放条上的「打开播放列表」
+      if (pos === 'minimal') {
+        act(() => { c.querySelector('#dsh-music-mini-trigger').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      } else {
+        act(() => { c.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      }
+      await act(async () => { await new Promise((r2) => setTimeout(r2, 0)) })
+      expect(c.querySelector('.dsh-music-panel').style.display).toBe('')
+      const panelBar = c.querySelector('.dsh-music-panel-bar')
+      expect(panelBar).toBeTruthy()
+      expect(panelBar.querySelectorAll('#dsh-music-bar-wrap').length).toBe(1)
+      expect(panelBar.querySelectorAll('.dsh-music-bar-btn').length).toBeGreaterThan(0)
+      // 与全局播放条完全一致：点歌名 = 开合弹窗（这里弹窗已开，于是关掉）
+      act(() => { panelBar.querySelector('.dsh-music-bar-name').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r2) => setTimeout(r2, 0)) })
+      expect(c.querySelector('.dsh-music-panel').style.display).toBe('none')
+      act(() => { r.unmount() })
+      c.remove()
+    }
   })
 })
