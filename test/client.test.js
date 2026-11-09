@@ -12999,7 +12999,7 @@ describe('播放条显示位置', () => {
       dock: barById('music-player-bar'),
       overlay: barById('music-player-bar-floating'),
       panel: (registered.find((r) => r.id === 'music-player-panel') || {}).elementFactory,
-      // 极简模式专用的左下角音乐图标（shell.overlay 独立注册）
+      // 极简模式专用的输入框右侧音乐图标（conversation.input.right 注册）
       trigger: (registered.find((r) => r.id === 'music-player-mini-trigger') || {}).elementFactory,
     }
   }
@@ -13354,7 +13354,7 @@ describe('播放条显示位置', () => {
     const { dock, overlay, panel, trigger } = await bootWithPrefs({})
     const container = mount(dock(), overlay(), panel(), trigger())
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // 极简前：输入框上方那条在，左下角图标不存在
+    // 极简前：输入框上方那条在，输入框右侧的音乐图标不存在
     expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(1)
     expect(container.querySelector('#dsh-music-mini-trigger')).toBeNull()
     // 打开「系统配置」，落到「播放条位置」行（系统配置最后一项）
@@ -13372,7 +13372,7 @@ describe('播放条显示位置', () => {
     expect(post).toBeTruthy()
     expect(post.prefs['dsh-music-bar-pos']).toBe('minimal')
     expect(prefsServer['dsh-music-bar-pos']).toBe('minimal')
-    // 极简后：播放条完全消失（两条全局挂载点都不画），左下角出现音乐图标
+    // 极简后：播放条完全消失（两条全局挂载点都不画），输入框右侧出现音乐图标
     expect(container.querySelectorAll('#dsh-music-bar-wrap').length).toBe(0)
     expect(document.documentElement.hasAttribute('data-dsh-music-bar-bottom')).toBe(false)
     expect(container.querySelector('#dsh-music-mini-trigger')).toBeTruthy()
@@ -13454,7 +13454,7 @@ describe('播放条显示位置', () => {
       const r = createRoot(c)
       act(() => { r.render(React.createElement('div', null, dock(), overlay(), panel(), trigger())) })
       await act(async () => { await new Promise((r2) => setTimeout(r2, 0)) })
-      // 极简下只能靠左下角图标开弹窗；其它落位点播放条上的「打开播放列表」
+      // 极简下只能靠输入框右侧的音乐图标开弹窗；其它落位点播放条上的「打开播放列表」
       if (pos === 'minimal') {
         act(() => { c.querySelector('#dsh-music-mini-trigger').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       } else {
