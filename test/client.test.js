@@ -2857,6 +2857,47 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { handle.dispatchEvent(pointer('pointerup', 500, 300)) })
   })
 
+  it('keeps the player panel below the desktop titlebar drag strip (issue #16)', async () => {
+    // dsh-desktop 把标题栏做成 -webkit-app-region: drag；面板是 fixed + z-index
+    // 高于它，top=0 时会盖住拖拽区，导致主窗口拖不动。框架在根元素发布
+    // --dsh-frame-top-clearance（Windows=标题栏高度，macOS=48px），面板最小 top
+    // 必须让开它；旧版本已经存成 y=0 的位置也要在恢复时被夹回来。
+    document.documentElement.style.setProperty('--dsh-frame-top-clearance', '32px')
+    prefsServer = { 'dsh-music-panel-pos': JSON.stringify({ x: 40, y: 0, w: 600, h: 500 }) }
+    try {
+      vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+      await bootClient()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const panelEl = container.querySelector('.dsh-music-panel')
+      // 恢复出来的旧坐标 y=0 被夹到安全线
+      expect(panelEl.style.top).toBe('32px')
+
+      // 拖到窗口顶部（甚至负数）也不能盖住标题栏
+      const head = container.querySelector('.dsh-music-panel-head')
+      expect(head).toBeTruthy()
+      const pointer = (type, x, y) => {
+        const ev = new Event(type, { bubbles: true })
+        ev.clientX = x; ev.clientY = y; ev.button = 0; ev.pointerId = 1
+        return ev
+      }
+      act(() => { head.dispatchEvent(pointer('pointerdown', 200, 200)) })
+      act(() => { head.dispatchEvent(pointer('pointermove', 200, -200)) })
+      expect(panelEl.style.top).toBe('32px')
+      act(() => { head.dispatchEvent(pointer('pointerup', 200, -200)) })
+      act(() => { root.unmount() })
+      container.remove()
+    } finally {
+      document.documentElement.style.removeProperty('--dsh-frame-top-clearance')
+    }
+  })
+
   it('opens the chapter TOC scrolled to the currently playing chapter (not the top)', async () => {
     // Re-boot with a book in the library so AI 讲书 (book) mode is available.
     const book = { id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }
@@ -13350,6 +13391,30 @@ describe('播放条显示位置', () => {
     expect(wrap.style.top).toBe('')
     expect(prefsServer['dsh-music-bar-float-pos']).toBeUndefined()
   })
+  it('keeps the floating bar below the desktop titlebar drag strip (issue #16)', async () => {
+    // 悬浮条也能被拖到窗口顶部；它同样不能盖住 dsh-desktop 的标题栏拖拽区。
+    document.documentElement.style.setProperty('--dsh-frame-top-clearance', '32px')
+    try {
+      const { dock, overlay } = await bootWithPrefs({ 'dsh-music-bar-pos': 'float' })
+      const container = mount(dock(), overlay())
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const wrap = container.querySelector('#dsh-music-bar-wrap')
+      const grabEl = container.querySelector('.dsh-music-bar-idle')
+      expect(grabEl).toBeTruthy()
+      const pointer = (type, x, y) => {
+        const ev = new Event(type, { bubbles: true })
+        ev.clientX = x; ev.clientY = y; ev.button = 0; ev.pointerId = 1
+        return ev
+      }
+      act(() => { grabEl.dispatchEvent(pointer('pointerdown', 300, 300)) })
+      act(() => { grabEl.dispatchEvent(pointer('pointermove', 300, -100)) })
+      expect(wrap.style.top).toBe('32px')
+      act(() => { grabEl.dispatchEvent(pointer('pointerup', 300, -100)) })
+    } finally {
+      document.documentElement.style.removeProperty('--dsh-frame-top-clearance')
+    }
+  })
+
   it('极简：系统配置出现「极简」选项，选中后持久化 bar-pos=minimal，播放条与音乐图标按预期切换', async () => {
     const { dock, overlay, panel, trigger } = await bootWithPrefs({})
     const container = mount(dock(), overlay(), panel(), trigger())
