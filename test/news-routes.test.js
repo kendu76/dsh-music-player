@@ -1716,7 +1716,7 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
 // 供 makeAgents 相关测试：拿到 boot 使用的 HOME（boot 里 DSH_HOME = HOME/.dsh）。
 function homeOf() { return process.env.HOME }
 
-// 假 agents 服务：roots / get / 可选 create。opts.dedicated 注入一个「专用新闻简报会话」agent。
+// 假 agents 服务：list / get / 可选 create（与当前 DSH AgentRegistry 一致；旧版本曾用 roots）。
 function makeAgents(opts = {}) {
   const injected = []
   const base = [
@@ -1736,7 +1736,7 @@ function makeAgents(opts = {}) {
   return {
     injected,
     service: {
-      roots: () => [...byId.values()],
+      list: () => [...byId.values()],
       get: (id) => byId.get(id),
       ...(opts.agentsCreate ? { create: opts.agentsCreate } : {}),
     },
