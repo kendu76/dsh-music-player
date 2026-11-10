@@ -963,6 +963,7 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(renamed[0].title).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} 科技\+主题:AI$/)
       // 注入收集指令（含定时任务信息，无同步/begin 语义）
       expect(agents.injected.length).toBe(1)
+      expect(agents.injected[0].msg.source).toEqual({ kind: 'user' })
       const text = agents.injected[0].msg.content[0].text
       expect(text).toContain('18:00')
       expect(text).toContain('s9')
@@ -978,6 +979,45 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).not.toContain('已报条目')
       // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
       expect(text).toMatch(/今天是 \d{4}年\d{1,2}月\d{1,2}日 星期[日一二三四五六]，当前时间 \d{2}:\d{2}/)
+    } finally { cleanup() }
+  })
+
+  it('run-now：followup 投递抛错 → 清 runState、记录失败、返回 fallback', async () => {
+    const agents = makeAgents({
+      agentsCreate: async (opts) => ({
+        agent: {
+          id: opts.sessionId,
+          session: { id: opts.sessionId },
+          followup: () => { throw new Error('followup boom') },
+        },
+      }),
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const { handler, cleanup } = boot({ agentsService: agents.service, sessionTitle: { rename: () => {} } })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's-boom', time: '18:00', autoplay: false, itemCount: 8, scope: { categories: ['科技'], topics: [] } }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's-boom' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(false)
+      expect(data.fallback).toBe(true)
+      expect(data.error).toContain('followup boom')
+      const run = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/news/runstate' }), run)
+      expect(JSON.parse(run.body).run).toBe(null)
+      const s = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/news/schedule' }), s)
+      const failures = JSON.parse(s.body).failures
+      expect(failures.length).toBe(1)
+      expect(failures[0].reason).toContain('followup boom')
+      expect(agents.injected.length).toBe(0)
     } finally { cleanup() }
   })
 
