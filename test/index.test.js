@@ -2702,6 +2702,48 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
     } finally { cleanup() }
   })
 
+  it('resolves the TTS key from XIAOMI_API_KEY even when settings.yaml is absent', async () => {
+    // DSH v1 can keep the provider config in a migrated store while the actual
+    // credential still lives in .credentials.yaml; About must not report 未配置.
+    const { handler, cleanup } = boot({
+      files: {
+        '.dsh/.credentials.yaml': 'version: 1\nrefs:\n  XIAOMI_API_KEY: sk-from-refs\n',
+      },
+      musicFiles: { 'novel.txt': '第一章\n正文。' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(res.status).toBe(200)
+      const manifest = JSON.parse(res.body)
+      expect(manifest.ttsConfigured).toBe(true)
+      expect(manifest.ttsReason).toBe('ok')
+    } finally { cleanup() }
+  })
+
+  it('re-checks TTS status after credentials appear (no stale negative cache)', async () => {
+    const prevX = process.env.XIAOMI_API_KEY
+    const prevM = process.env.MIMO_API_KEY
+    delete process.env.XIAOMI_API_KEY
+    delete process.env.MIMO_API_KEY
+    const { handler, home, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文。' } })
+    try {
+      const first = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), first)
+      expect(JSON.parse(first.body).ttsConfigured).toBe(false)
+      // 用户在 Host 启动后才配置密钥：下一次 /manifest 必须重新判断，不能复用旧结果。
+      mkdirSync(join(home, '.dsh'), { recursive: true })
+      writeFileSync(join(home, '.dsh/.credentials.yaml'), 'version: 1\nrefs:\n  XIAOMI_API_KEY: sk-late\n')
+      const second = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), second)
+      expect(JSON.parse(second.body).ttsConfigured).toBe(true)
+    } finally {
+      cleanup()
+      if (prevX === undefined) delete process.env.XIAOMI_API_KEY; else process.env.XIAOMI_API_KEY = prevX
+      if (prevM === undefined) delete process.env.MIMO_API_KEY; else process.env.MIMO_API_KEY = prevM
+    }
+  })
+
   it('still resolves the TTS key from the legacy flat credentials layout', async () => {
     // Pre-v1 DSH wrote keys at column 0; that layout must keep working.
     const { handler, cleanup } = boot({
