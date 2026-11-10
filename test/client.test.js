@@ -13539,4 +13539,24 @@ describe('播放条显示位置', () => {
       c.remove()
     }
   })
+
+  it('停止/空闲时弹窗顶部不渲染播放条；开始播放后自动回来', async () => {
+    const { dock, panel } = await bootWithPrefs({})
+    const container = mount(dock(), panel())
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 无当前内容：全局空闲条仍在，点它打开面板
+    const idle = container.querySelector('.dsh-music-bar-idle')
+    expect(idle).toBeTruthy()
+    act(() => { idle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-panel').style.display).toBe('')
+    expect(container.querySelector('.dsh-music-panel-bar')).toBeNull()
+    // 从曲库起播：当前曲目出现，弹窗顶部播放条恢复
+    const track = container.querySelector('.dsh-music-track')
+    expect(track).toBeTruthy()
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-panel-bar')).toBeTruthy()
+    expect(container.querySelectorAll('.dsh-music-panel-bar #dsh-music-bar-wrap').length).toBe(1)
+  })
 })
